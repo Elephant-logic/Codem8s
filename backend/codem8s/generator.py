@@ -103,11 +103,110 @@ def _core_file(path: str) -> Optional[str]:
     return None
 
 
+def _static_app_jsx() -> str:
+    return """import React, { useState } from 'react';
+
+const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s.onrender.com';
+
+export default function App() {
+  const [idea, setIdea] = useState('Build a useful full-stack app');
+  const [change, setChange] = useState('');
+  const [state, setState] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function post(url, body) {
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch(API + url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Request failed');
+      setState(data);
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function createSpec() {
+    post('/projects', { idea, stack: 'react-fastapi', use_ai: true });
+  }
+
+  function buildNext() {
+    if (state) post(`/projects/${state.project_id}/build-next`, {});
+  }
+
+  function applyChange() {
+    if (state && change.trim()) {
+      post(`/projects/${state.project_id}/change`, { instruction: change });
+      setChange('');
+    }
+  }
+
+  function validateProject() {
+    if (state) post(`/projects/${state.project_id}/validate`, {});
+  }
+
+  function exportZip() {
+    if (state) window.location.href = API + `/projects/${state.project_id}/export`;
+  }
+
+  const files = state ? Object.values(state.files) : [];
+
+  return (
+    <main className="app">
+      <h1>Codem8s</h1>
+      <p>Full-stack AI code factory with locked specs, live steering, validation, and zip export.</p>
+      <section className="card">
+        <h2>Idea</h2>
+        <textarea value={idea} onChange={(event) => setIdea(event.target.value)} />
+        <button onClick={createSpec} disabled={busy}>Create Spec</button>
+        <button onClick={buildNext} disabled={!state || busy}>Build Next File</button>
+        <button onClick={validateProject} disabled={!state || busy}>Validate</button>
+        <button onClick={exportZip} disabled={!state}>Export Zip</button>
+      </section>
+      <section className="card">
+        <h2>Steer While Building</h2>
+        <textarea value={change} onChange={(event) => setChange(event.target.value)} />
+        <button onClick={applyChange} disabled={!state || busy}>Apply Instruction</button>
+      </section>
+      {error && <section className="card bad">{error}</section>}
+      <section className="card">
+        <h2>Spec</h2>
+        <pre className="log">{state ? JSON.stringify(state.spec, null, 2) : 'No project yet'}</pre>
+      </section>
+      <section className="card">
+        <h2>Files</h2>
+        {files.map((file) => (
+          <div className="file" key={file.path}>
+            <strong>{file.path}</strong> <span className={file.status === 'valid' ? 'ok' : 'bad'}>{file.status}</span>
+            {file.errors && file.errors.length > 0 && <pre className="bad">{file.errors.join('\n')}</pre>}
+          </div>
+        ))}
+      </section>
+      <section className="card">
+        <h2>Logs</h2>
+        <pre className="log">{state?.logs?.join('\n') || ''}</pre>
+      </section>
+    </main>
+  );
+}
+"""
+
+
 def _static_file(path: str, spec: ProjectSpec) -> Optional[str]:
     if path == "README.md":
         return f"""# {spec.app_name}\n\n{spec.goal}\n\n## Stack\n\n{spec.stack}\n\n## How to use\n\nCreate a spec, build files, steer with extra instructions, validate, then export the zip.\n"""
     if path == "frontend/package.json":
         return '{"scripts":{"dev":"vite --host 0.0.0.0","build":"vite build","preview":"vite preview"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","react":"latest","react-dom":"latest","lucide-react":"latest"},"devDependencies":{}}'
+    if path == "frontend/src/App.jsx":
+        return _static_app_jsx()
     if path == "frontend/src/main.jsx":
         return "import React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport App from './App.jsx';\nimport './styles.css';\n\ncreateRoot(document.getElementById('root')).render(<App />);\n"
     if path == "frontend/src/styles.css":
