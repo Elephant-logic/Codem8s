@@ -12,15 +12,7 @@ def slug(text: str) -> str:
 
 def app_kind(idea: str) -> str:
     text = idea.lower()
-    options = [
-        ("job", ["job", "career", "interview", "employer"]),
-        ("crm", ["crm", "customer", "client", "contact", "lead"]),
-        ("inventory", ["inventory", "stock", "product", "sku"]),
-        ("booking", ["booking", "appointment", "reservation", "schedule"]),
-        ("todo", ["todo", "task", "kanban"]),
-        ("notes", ["note", "journal", "wiki"]),
-        ("expense", ["expense", "budget", "invoice", "payment"]),
-    ]
+    options = [("job", ["job", "career", "interview", "employer"]), ("crm", ["crm", "customer", "client", "contact", "lead"]), ("inventory", ["inventory", "stock", "product", "sku"]), ("booking", ["booking", "appointment", "reservation", "schedule"]), ("todo", ["todo", "task", "kanban"]), ("notes", ["note", "journal", "wiki"]), ("expense", ["expense", "budget", "invoice", "payment"])]
     for kind, words in options:
         if any(word in text for word in words):
             return kind
@@ -28,60 +20,14 @@ def app_kind(idea: str) -> str:
 
 
 FIELD_LIBRARY = {
-    "job": [
-        {"name": "company", "label": "Company", "type": "text", "required": True},
-        {"name": "role", "label": "Role", "type": "text", "required": True},
-        {"name": "status", "label": "Status", "type": "select", "default": "saved", "options": ["saved", "applied", "interview", "offer", "rejected"]},
-        {"name": "notes", "label": "Notes", "type": "textarea", "default": ""},
-        {"name": "next_action", "label": "Next action", "type": "text", "default": ""},
-    ],
-    "crm": [
-        {"name": "name", "label": "Name", "type": "text", "required": True},
-        {"name": "company", "label": "Company", "type": "text", "default": ""},
-        {"name": "email", "label": "Email", "type": "email", "default": ""},
-        {"name": "status", "label": "Status", "type": "select", "default": "lead", "options": ["lead", "contacted", "proposal", "won", "lost"]},
-        {"name": "notes", "label": "Notes", "type": "textarea", "default": ""},
-    ],
-    "inventory": [
-        {"name": "product", "label": "Product", "type": "text", "required": True},
-        {"name": "sku", "label": "SKU", "type": "text", "default": ""},
-        {"name": "quantity", "label": "Quantity", "type": "number", "default": "0"},
-        {"name": "status", "label": "Status", "type": "select", "default": "in_stock", "options": ["in_stock", "low", "ordered", "discontinued"]},
-        {"name": "notes", "label": "Notes", "type": "textarea", "default": ""},
-    ],
-    "booking": [
-        {"name": "customer", "label": "Customer", "type": "text", "required": True},
-        {"name": "service", "label": "Service", "type": "text", "required": True},
-        {"name": "date", "label": "Date", "type": "date", "default": ""},
-        {"name": "status", "label": "Status", "type": "select", "default": "booked", "options": ["booked", "confirmed", "completed", "cancelled"]},
-        {"name": "notes", "label": "Notes", "type": "textarea", "default": ""},
-    ],
-    "todo": [
-        {"name": "task", "label": "Task", "type": "text", "required": True},
-        {"name": "owner", "label": "Owner", "type": "text", "default": ""},
-        {"name": "status", "label": "Status", "type": "select", "default": "todo", "options": ["todo", "doing", "done", "blocked"]},
-        {"name": "priority", "label": "Priority", "type": "select", "default": "medium", "options": ["low", "medium", "high"]},
-        {"name": "notes", "label": "Notes", "type": "textarea", "default": ""},
-    ],
-    "notes": [
-        {"name": "title", "label": "Title", "type": "text", "required": True},
-        {"name": "category", "label": "Category", "type": "text", "default": ""},
-        {"name": "status", "label": "Status", "type": "select", "default": "draft", "options": ["draft", "active", "archived"]},
-        {"name": "notes", "label": "Notes", "type": "textarea", "default": ""},
-    ],
-    "expense": [
-        {"name": "title", "label": "Title", "type": "text", "required": True},
-        {"name": "amount", "label": "Amount", "type": "number", "default": "0"},
-        {"name": "category", "label": "Category", "type": "text", "default": ""},
-        {"name": "status", "label": "Status", "type": "select", "default": "pending", "options": ["pending", "paid", "overdue"]},
-        {"name": "notes", "label": "Notes", "type": "textarea", "default": ""},
-    ],
-    "records": [
-        {"name": "title", "label": "Title", "type": "text", "required": True},
-        {"name": "description", "label": "Description", "type": "textarea", "default": ""},
-        {"name": "status", "label": "Status", "type": "select", "default": "active", "options": ["active", "paused", "done"]},
-        {"name": "notes", "label": "Notes", "type": "textarea", "default": ""},
-    ],
+    "job": [{"name": "company", "label": "Company", "type": "text", "required": True}, {"name": "role", "label": "Role", "type": "text", "required": True}, {"name": "status", "label": "Status", "type": "select", "default": "saved", "options": ["saved", "applied", "interview", "offer", "rejected"]}, {"name": "notes", "label": "Notes", "type": "textarea", "default": ""}, {"name": "next_action", "label": "Next action", "type": "text", "default": ""}],
+    "crm": [{"name": "name", "label": "Name", "type": "text", "required": True}, {"name": "company", "label": "Company", "type": "text", "default": ""}, {"name": "email", "label": "Email", "type": "email", "default": ""}, {"name": "status", "label": "Status", "type": "select", "default": "lead", "options": ["lead", "contacted", "proposal", "won", "lost"]}, {"name": "notes", "label": "Notes", "type": "textarea", "default": ""}],
+    "inventory": [{"name": "product", "label": "Product", "type": "text", "required": True}, {"name": "sku", "label": "SKU", "type": "text", "default": ""}, {"name": "quantity", "label": "Quantity", "type": "number", "default": "0"}, {"name": "status", "label": "Status", "type": "select", "default": "in_stock", "options": ["in_stock", "low", "ordered", "discontinued"]}, {"name": "notes", "label": "Notes", "type": "textarea", "default": ""}],
+    "booking": [{"name": "customer", "label": "Customer", "type": "text", "required": True}, {"name": "service", "label": "Service", "type": "text", "required": True}, {"name": "date", "label": "Date", "type": "date", "default": ""}, {"name": "status", "label": "Status", "type": "select", "default": "booked", "options": ["booked", "confirmed", "completed", "cancelled"]}, {"name": "notes", "label": "Notes", "type": "textarea", "default": ""}],
+    "todo": [{"name": "task", "label": "Task", "type": "text", "required": True}, {"name": "owner", "label": "Owner", "type": "text", "default": ""}, {"name": "status", "label": "Status", "type": "select", "default": "todo", "options": ["todo", "doing", "done", "blocked"]}, {"name": "priority", "label": "Priority", "type": "select", "default": "medium", "options": ["low", "medium", "high"]}, {"name": "notes", "label": "Notes", "type": "textarea", "default": ""}],
+    "notes": [{"name": "title", "label": "Title", "type": "text", "required": True}, {"name": "category", "label": "Category", "type": "text", "default": ""}, {"name": "status", "label": "Status", "type": "select", "default": "draft", "options": ["draft", "active", "archived"]}, {"name": "notes", "label": "Notes", "type": "textarea", "default": ""}],
+    "expense": [{"name": "title", "label": "Title", "type": "text", "required": True}, {"name": "amount", "label": "Amount", "type": "number", "default": "0"}, {"name": "category", "label": "Category", "type": "text", "default": ""}, {"name": "status", "label": "Status", "type": "select", "default": "pending", "options": ["pending", "paid", "overdue"]}, {"name": "notes", "label": "Notes", "type": "textarea", "default": ""}],
+    "records": [{"name": "title", "label": "Title", "type": "text", "required": True}, {"name": "description", "label": "Description", "type": "textarea", "default": ""}, {"name": "status", "label": "Status", "type": "select", "default": "active", "options": ["active", "paused", "done"]}, {"name": "notes", "label": "Notes", "type": "textarea", "default": ""}],
 }
 
 
@@ -96,30 +42,17 @@ def wants_sqlite(idea: str) -> bool:
 
 def infer_features(idea: str) -> List[str]:
     kind = app_kind(idea)
-    features = ["React frontend", "FastAPI backend", f"{kind} workflow", "dynamic form", "dynamic list"]
+    features = ["React frontend", "FastAPI backend", f"{kind} workflow", "dynamic form", "dynamic list", "workflow pages"]
     if "dashboard" in idea.lower() or kind in {"job", "crm", "inventory", "expense"}:
         features.append("dashboard summary")
     if wants_sqlite(idea):
         features.append("SQLite persistence")
-    if "login" in idea.lower() or "account" in idea.lower() or "user" in idea.lower():
-        features.append("local profile panel")
     return list(dict.fromkeys(features))
 
 
 def infer_files(idea: str, stack: str = "react-fastapi") -> Dict[str, str]:
     kind = app_kind(idea)
-    files = {
-        "backend/main.py": f"FastAPI backend for {kind}",
-        "backend/requirements.txt": "backend dependencies",
-        "frontend/package.json": "frontend dependencies",
-        "frontend/index.html": "HTML entry",
-        "frontend/src/App.jsx": "main React app shell",
-        "frontend/src/main.jsx": "React entry",
-        "frontend/src/styles.css": "styles",
-        "frontend/src/components/DynamicForm.jsx": "generated form component",
-        "frontend/src/components/RecordList.jsx": "generated list component",
-        "README.md": "instructions",
-    }
+    files = {"backend/main.py": f"FastAPI backend for {kind}", "backend/requirements.txt": "backend dependencies", "frontend/package.json": "frontend dependencies", "frontend/index.html": "HTML entry", "frontend/src/App.jsx": "main React app shell", "frontend/src/main.jsx": "React entry", "frontend/src/styles.css": "styles", "frontend/src/components/DynamicForm.jsx": "generated form component", "frontend/src/components/RecordList.jsx": "generated list component", "frontend/src/components/WorkflowTabs.jsx": "workflow navigation tabs", "frontend/src/components/WorkflowPage.jsx": "app specific workflow page", "README.md": "instructions"}
     if wants_sqlite(idea):
         files["backend/store.py"] = "SQLite helper used by backend"
     if "dashboard" in idea.lower() or kind in {"job", "crm", "inventory", "expense"}:
