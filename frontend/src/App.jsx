@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 
-const API = 'http://localhost:8000';
+const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s.onrender.com';
 
 export default function App() {
   const [idea, setIdea] = useState('Build Codem8s as a full-stack AI code factory');
@@ -11,27 +11,42 @@ export default function App() {
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('gpt-4o-mini');
   const [useAi, setUseAi] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => { loadSettings(); }, []);
 
+  async function request(url, options = {}) {
+    setError('');
+    const response = await fetch(API + url, options);
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(data?.detail || `Request failed: ${response.status}`);
+    }
+    return data;
+  }
+
   async function loadSettings() {
-    const response = await fetch(API + '/settings');
-    const data = await response.json();
-    setSettings(data);
-    setModel(data.openai_model || 'gpt-4o-mini');
+    try {
+      const data = await request('/settings');
+      setSettings(data);
+      setModel(data.openai_model || 'gpt-4o-mini');
+    } catch (err) {
+      setError(String(err.message || err));
+    }
   }
 
   async function saveSettings() {
     setBusy(true);
     try {
-      const response = await fetch(API + '/settings', {
+      const data = await request('/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ openai_api_key: apiKey, openai_model: model }),
       });
-      const data = await response.json();
       setSettings(data);
       setApiKey('');
+    } catch (err) {
+      setError(String(err.message || err));
     } finally {
       setBusy(false);
     }
@@ -40,13 +55,14 @@ export default function App() {
   async function post(url, body) {
     setBusy(true);
     try {
-      const response = await fetch(API + url, {
+      const data = await request(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      const data = await response.json();
       setState(data);
+    } catch (err) {
+      setError(String(err.message || err));
     } finally {
       setBusy(false);
     }
@@ -78,7 +94,9 @@ export default function App() {
   return (
     <main className="app">
       <h1>Codem8s Full Stack</h1>
-      <p>API key stored locally. Locked spec. File-by-file build. Live steering. No fake code saved.</p>
+      <p>Locked spec. File-by-file build. Live steering. No fake code saved.</p>
+      <p><b>Backend:</b> {API}</p>
+      {error && <section className="card bad"><b>Error:</b> {error}</section>}
 
       <section className="card settings">
         <h2>OpenAI Settings</h2>
@@ -90,7 +108,7 @@ export default function App() {
             type="password"
             value={apiKey}
             onChange={(event) => setApiKey(event.target.value)}
-            placeholder="Paste OpenAI API key once"
+            placeholder="Paste OpenAI API key once, or use Render env var"
           />
           <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="Model" />
           <button onClick={saveSettings} disabled={busy}>Save Settings</button>
@@ -104,7 +122,7 @@ export default function App() {
           <textarea value={idea} onChange={(event) => setIdea(event.target.value)} />
           <label className="check">
             <input type="checkbox" checked={useAi} onChange={(event) => setUseAi(event.target.checked)} />
-            Use stored OpenAI API key for generation
+            Use OpenAI for generation
           </label>
           <button onClick={createProject} disabled={busy}>Create Spec</button>
           <button onClick={buildNext} disabled={!state || busy}>Build Next File</button>
@@ -131,6 +149,7 @@ export default function App() {
         {state && Object.values(state.files).map((file) => (
           <div className="file" key={file.path}>
             <b>{file.path}</b> <span className={file.status === 'valid' ? 'ok' : 'bad'}>{file.status}</span>
+            {file.content && <pre className="log">{file.content.slice(0, 1200)}</pre>}
             {file.errors?.length > 0 && <pre className="bad">{file.errors.join('\n')}</pre>}
           </div>
         ))}
