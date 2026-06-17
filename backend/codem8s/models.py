@@ -17,6 +17,7 @@ class FileSpec(BaseModel):
     status: str = "pending"
     content: str = ""
     errors: List[str] = []
+    attempts: int = 0
 
 class ProjectSpec(BaseModel):
     app_name: str
