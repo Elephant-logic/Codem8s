@@ -127,7 +127,7 @@ def app_jsx(spec: ProjectSpec) -> str:
     if has_dashboard:
         imports.append("import Dashboard from './Dashboard.jsx';")
     import_text = "\n".join(imports)
-    profile = "{profile ? <p className='notice'>Profile: {profile.email}</p> : <ProfilePanel onSave={setProfile} />}" if has_profile else ""
+    profile = "{profile ? <p className=\"notice\">Profile: {profile.email}</p> : <ProfilePanel onSave={setProfile} />}" if has_profile else ""
     dashboard = "<Dashboard items={items} />" if has_dashboard else ""
     return f'''import React, {{ useEffect, useState }} from 'react';
 {import_text}
@@ -146,15 +146,25 @@ export default function App() {{
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Load failed');
       setItems(data);
-    }} catch (err) {{ setError(String(err.message || err)); }}
+    }} catch (err) {{
+      setError(String(err.message || err));
+    }}
   }}
 
   async function addItem(event) {{
     event.preventDefault();
     if (!title.trim()) return;
-    const res = await fetch(API + '/items', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ title, description, status: 'active' }}) }});
+    const res = await fetch(API + '/items', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ title, description, status: 'active' }}),
+    }});
     const data = await res.json();
-    if (res.ok) {{ setItems([data, ...items]); setTitle(''); setDescription(''); }}
+    if (res.ok) {{
+      setItems([data, ...items]);
+      setTitle('');
+      setDescription('');
+    }}
   }}
 
   async function removeItem(id) {{
@@ -164,7 +174,37 @@ export default function App() {{
 
   useEffect(() => {{ loadItems(); }}, []);
 
-  return <main className="app"><section className="hero"><h1>{name}</h1><p>{goal}</p></section>{profile}{dashboard}<section className="grid"><form className="card" onSubmit={{addItem}}><h2>Create record</h2><input value={{title}} onChange={{(e)=>setTitle(e.target.value)}} placeholder="Title"/><textarea value={{description}} onChange={{(e)=>setDescription(e.target.value)}} placeholder="Description"/><button>Add</button>{{error && <p className="error">{{error}}</p>}}</form><section className="card"><h2>Records</h2>{{items.map((item)=><article className="item" key={{item.id}}><div><b>{{item.title}}</b><p>{{item.description}}</p></div><button onClick={{()=>removeItem(item.id)}}>Delete</button></article>)}}</section></section></main>;
+  return (
+    <main className="app">
+      <section className="hero">
+        <h1>{name}</h1>
+        <p>{goal}</p>
+      </section>
+      {profile}
+      {dashboard}
+      <section className="grid">
+        <form className="card" onSubmit={{addItem}}>
+          <h2>Create record</h2>
+          <input value={{title}} onChange={{(event) => setTitle(event.target.value)}} placeholder="Title" />
+          <textarea value={{description}} onChange={{(event) => setDescription(event.target.value)}} placeholder="Description" />
+          <button type="submit">Add</button>
+          {{error && <p className="error">{{error}}</p>}}
+        </form>
+        <section className="card">
+          <h2>Records</h2>
+          {{items.map((item) => (
+            <article className="item" key={{item.id}}>
+              <div>
+                <b>{{item.title}}</b>
+                <p>{{item.description}}</p>
+              </div>
+              <button onClick={{() => removeItem(item.id)}}>Delete</button>
+            </article>
+          ))}}
+        </section>
+      </section>
+    </main>
+  );
 }}
 '''
 
