@@ -1,85 +1,82 @@
 from __future__ import annotations
 
-from pathlib import Path
+import json
+import re
 from typing import Dict, List, Optional
 
 from .models import ProjectSpec
 from .settings import get_openai_key, get_openai_model
 
-BASE_FILES: Dict[str, str] = {
-    "backend/main.py": "FastAPI app exposing project, change, validate, export endpoints",
-    "backend/generator.py": "spec builder and file generator",
-    "backend/validator.py": "strict file and project validator",
-    "backend/runner.py": "syntax and smoke-test runner",
-    "backend/settings.py": "local settings and stored API key management",
-    "backend/exporter.py": "zip export utility",
-    "frontend/package.json": "React package config",
-    "frontend/src/App.jsx": "live steering user interface",
-    "frontend/src/main.jsx": "React entry point",
-    "frontend/src/styles.css": "application styling",
-    "README.md": "setup and usage instructions",
-}
-
 FEATURE_HINTS = {
-    "login": "authentication screens and protected routes",
-    "dashboard": "dashboard cards, charts, and saved runs",
-    "game": "interactive canvas or game loop",
-    "api": "REST API endpoints and typed schemas",
-    "database": "SQLite persistence layer",
-    "upload": "file upload and inspection workflow",
-    "export": "zip export and project download",
-    "chat": "streaming chat panel and message history",
+    "login": "authentication and user accounts",
+    "auth": "authentication and user accounts",
+    "dashboard": "dashboard summary cards",
+    "game": "interactive game screen",
+    "api": "REST API endpoints",
+    "database": "persistent storage layer",
+    "sqlite": "SQLite storage layer",
+    "upload": "file upload workflow",
+    "chat": "chat style message interface",
+    "shop": "catalog and basket workflow",
+    "todo": "task management workflow",
+    "notes": "notes CRUD workflow",
+    "crm": "contacts and pipeline workflow",
 }
 
-CORE_COPY_FILES = {
-    "backend/generator.py": "generator.py",
-    "backend/validator.py": "validator.py",
-    "backend/settings.py": "settings.py",
-    "backend/runner.py": "runner.py",
-    "backend/exporter.py": "exporter.py",
-}
 
-REQUIRED_NAMES = {
-    "backend/main.py": ["app"],
-    "backend/generator.py": ["build_spec", "generate_file"],
-    "backend/validator.py": ["validate_file", "detect_placeholders"],
-    "backend/settings.py": ["load_settings", "save_settings", "settings_status"],
-}
+def _slug(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:32] or "generated-app"
 
 
 def infer_features(idea: str) -> List[str]:
     text = idea.lower()
-    features = ["locked project spec", "file-by-file build", "live change instructions", "strict validation", "zip export"]
+    features = ["React frontend", "FastAPI backend", "CRUD workflow", "zip export ready"]
     for key, value in FEATURE_HINTS.items():
         if key in text:
             features.append(value)
     return list(dict.fromkeys(features))
 
 
+def infer_files(idea: str, stack: str = "react-fastapi") -> Dict[str, str]:
+    text = idea.lower()
+    files: Dict[str, str] = {
+        "backend/main.py": f"FastAPI backend for: {idea}",
+        "backend/requirements.txt": "Python dependencies for the generated backend",
+        "frontend/package.json": "React/Vite package config for the generated frontend",
+        "frontend/index.html": "Vite HTML entry point",
+        "frontend/src/App.jsx": f"Main React UI for: {idea}",
+        "frontend/src/main.jsx": "React entry point",
+        "frontend/src/styles.css": "Application styling",
+        "README.md": "Setup and usage instructions for the generated project",
+    }
+    if any(word in text for word in ["database", "sqlite", "save", "history", "notes", "todo", "crm"]):
+        files["backend/store.py"] = "SQLite persistence helper"
+    if any(word in text for word in ["login", "auth", "account", "user"]):
+        files["backend/auth.py"] = "Authentication helper functions"
+        files["frontend/src/AuthPanel.jsx"] = "Login and registration UI panel"
+    if any(word in text for word in ["upload", "file", "image", "pdf"]):
+        files["backend/uploads.py"] = "Upload handling helpers"
+        files["frontend/src/UploadPanel.jsx"] = "File upload UI panel"
+    if any(word in text for word in ["dashboard", "chart", "analytics", "metrics"]):
+        files["frontend/src/Dashboard.jsx"] = "Dashboard cards and summaries"
+    return files
+
+
 def build_spec(idea: str, stack: str = "react-fastapi") -> ProjectSpec:
     clean = " ".join(idea.strip().split())
-    name = "Codem8s Project" if len(clean) < 40 else clean[:40].rstrip()
-    if "codem8" in clean.lower():
-        name = "Codem8s"
-    return ProjectSpec(app_name=name, goal=clean, stack=stack, features=infer_features(clean), files=BASE_FILES.copy())
+    name = " ".join(word.capitalize() for word in _slug(clean).split("-")[:4]) or "Generated App"
+    return ProjectSpec(app_name=name, goal=clean, stack=stack, features=infer_features(clean), files=infer_files(clean, stack))
 
 
 def apply_instruction(spec: ProjectSpec, instruction: str) -> ProjectSpec:
     text = " ".join(instruction.strip().split())
     if text:
         spec.change_log.append(text)
-    lowered = text.lower()
-    if any(word in lowered for word in ["login", "auth", "user account"]):
-        spec.features.append("authentication flow")
-        spec.files["frontend/src/auth.jsx"] = "authentication panel"
-        spec.files["backend/auth.py"] = "token issuing and verification helpers"
-    if any(word in lowered for word in ["sqlite", "database", "save history"]):
-        spec.features.append("SQLite project history")
-        spec.files["backend/store.py"] = "SQLite storage for projects and generated files"
-    if any(word in lowered for word in ["test", "pytest"]):
-        spec.features.append("test suite")
-        spec.files["backend/tests/test_validator.py"] = "validator unit tests"
-    spec.features = list(dict.fromkeys(spec.features))
+    merged_goal = f"{spec.goal}. Change request: {text}"
+    spec.features = list(dict.fromkeys(spec.features + infer_features(text)))
+    for path, purpose in infer_files(merged_goal, spec.stack).items():
+        spec.files.setdefault(path, purpose)
     return spec
 
 
@@ -96,121 +93,187 @@ def _extract_code_block(text: str) -> str:
     return parts[1].strip()
 
 
-def _core_file(path: str) -> Optional[str]:
-    local_name = CORE_COPY_FILES.get(path)
-    if local_name:
-        return Path(__file__).with_name(local_name).read_text(encoding="utf-8")
-    return None
+def _backend_main(spec: ProjectSpec) -> str:
+    title = spec.app_name.replace('"', "'")
+    goal = spec.goal.replace('"', "'")
+    return f'''from __future__ import annotations
+
+from datetime import datetime
+from typing import Dict, List
+from uuid import uuid4
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+app = FastAPI(title="{title}")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+class ItemIn(BaseModel):
+    title: str = Field(min_length=1)
+    description: str = ""
+    status: str = "active"
+
+class Item(ItemIn):
+    id: str
+    created_at: str
+
+ITEMS: Dict[str, Item] = {{}}
+
+@app.get("/")
+def root():
+    return {{"app": "{title}", "goal": "{goal}", "status": "online"}}
+
+@app.get("/health")
+def health():
+    return {{"ok": True}}
+
+@app.get("/items", response_model=List[Item])
+def list_items():
+    return list(ITEMS.values())
+
+@app.post("/items", response_model=Item)
+def create_item(item: ItemIn):
+    record = Item(id=str(uuid4()), created_at=datetime.utcnow().isoformat(), **item.model_dump())
+    ITEMS[record.id] = record
+    return record
+
+@app.put("/items/{{item_id}}", response_model=Item)
+def update_item(item_id: str, item: ItemIn):
+    if item_id not in ITEMS:
+        raise HTTPException(404, "Item not found")
+    record = Item(id=item_id, created_at=ITEMS[item_id].created_at, **item.model_dump())
+    ITEMS[item_id] = record
+    return record
+
+@app.delete("/items/{{item_id}}")
+def delete_item(item_id: str):
+    if item_id not in ITEMS:
+        raise HTTPException(404, "Item not found")
+    del ITEMS[item_id]
+    return {{"deleted": item_id}}
+'''
 
 
-def _static_app_jsx() -> str:
-    return """import React, { useState } from 'react';
+def _app_jsx(spec: ProjectSpec) -> str:
+    app_name = spec.app_name.replace("'", "\\'")
+    goal = spec.goal.replace("'", "\\'")
+    features = json.dumps(spec.features)
+    return f'''import React, {{ useEffect, useState }} from 'react';
 
-const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s.onrender.com';
+const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const FEATURES = {features};
 
-export default function App() {
-  const [idea, setIdea] = useState('Build a useful full-stack app');
-  const [change, setChange] = useState('');
-  const [state, setState] = useState(null);
-  const [busy, setBusy] = useState(false);
+export default function App() {{
+  const [items, setItems] = useState([]);
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
   const [error, setError] = useState('');
 
-  async function post(url, body) {
-    setBusy(true);
+  async function loadItems() {{
     setError('');
-    try {
-      const response = await fetch(API + url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+    try {{
+      const response = await fetch(API + '/items');
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Request failed');
-      setState(data);
-    } catch (err) {
+      if (!response.ok) throw new Error(data.detail || 'Could not load items');
+      setItems(data);
+    }} catch (err) {{
       setError(String(err.message || err));
-    } finally {
-      setBusy(false);
-    }
-  }
+    }}
+  }}
 
-  function createSpec() {
-    post('/projects', { idea, stack: 'react-fastapi', use_ai: true });
-  }
+  async function addItem(event) {{
+    event.preventDefault();
+    if (!title.trim()) return;
+    setError('');
+    try {{
+      const response = await fetch(API + '/items', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ title, description, status: 'active' }}),
+      }});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not save item');
+      setItems((current) => [data, ...current]);
+      setTitle('');
+      setDescription('');
+    }} catch (err) {{
+      setError(String(err.message || err));
+    }}
+  }}
 
-  function buildNext() {
-    if (state) post(`/projects/${state.project_id}/build-next`, {});
-  }
+  async function removeItem(id) {{
+    await fetch(API + '/items/' + id, {{ method: 'DELETE' }});
+    setItems((current) => current.filter((item) => item.id !== id));
+  }}
 
-  function applyChange() {
-    if (state && change.trim()) {
-      post(`/projects/${state.project_id}/change`, { instruction: change });
-      setChange('');
-    }
-  }
-
-  function validateProject() {
-    if (state) post(`/projects/${state.project_id}/validate`, {});
-  }
-
-  function exportZip() {
-    if (state) window.location.href = API + `/projects/${state.project_id}/export`;
-  }
-
-  const files = state ? Object.values(state.files) : [];
+  useEffect(() => {{ loadItems(); }}, []);
 
   return (
     <main className="app">
-      <h1>Codem8s</h1>
-      <p>Full-stack AI code factory with locked specs, live steering, validation, and zip export.</p>
-      <section className="card">
-        <h2>Idea</h2>
-        <textarea value={idea} onChange={(event) => setIdea(event.target.value)} />
-        <button onClick={createSpec} disabled={busy}>Create Spec</button>
-        <button onClick={buildNext} disabled={!state || busy}>Build Next File</button>
-        <button onClick={validateProject} disabled={!state || busy}>Validate</button>
-        <button onClick={exportZip} disabled={!state}>Export Zip</button>
+      <section className="hero">
+        <p className="eyebrow">Generated by Codem8s</p>
+        <h1>{app_name}</h1>
+        <p>{goal}</p>
       </section>
+
       <section className="card">
-        <h2>Steer While Building</h2>
-        <textarea value={change} onChange={(event) => setChange(event.target.value)} />
-        <button onClick={applyChange} disabled={!state || busy}>Apply Instruction</button>
+        <h2>Features</h2>
+        <div className="chips">
+          {{FEATURES.map((feature) => <span key={{feature}}>{{feature}}</span>)}}
+        </div>
       </section>
-      {error && <section className="card bad">{error}</section>}
-      <section className="card">
-        <h2>Spec</h2>
-        <pre className="log">{state ? JSON.stringify(state.spec, null, 2) : 'No project yet'}</pre>
-      </section>
-      <section className="card">
-        <h2>Files</h2>
-        {files.map((file) => (
-          <div className="file" key={file.path}>
-            <strong>{file.path}</strong> <span className={file.status === 'valid' ? 'ok' : 'bad'}>{file.status}</span>
-            {file.errors && file.errors.length > 0 && <pre className="bad">{file.errors.join('\n')}</pre>}
-          </div>
-        ))}
-      </section>
-      <section className="card">
-        <h2>Logs</h2>
-        <pre className="log">{state?.logs?.join('\n') || ''}</pre>
+
+      <section className="grid">
+        <form className="card" onSubmit={{addItem}}>
+          <h2>Create</h2>
+          <input value={{title}} onChange={{(event) => setTitle(event.target.value)}} placeholder="Title" />
+          <textarea value={{description}} onChange={{(event) => setDescription(event.target.value)}} placeholder="Description" />
+          <button type="submit">Add item</button>
+          {{error && <p className="error">{{error}}</p>}}
+        </form>
+
+        <section className="card">
+          <h2>Items</h2>
+          {{items.length === 0 && <p>No items yet.</p>}}
+          {{items.map((item) => (
+            <article className="item" key={{item.id}}>
+              <div>
+                <strong>{{item.title}}</strong>
+                <p>{{item.description}}</p>
+              </div>
+              <button onClick={{() => removeItem(item.id)}}>Delete</button>
+            </article>
+          ))}}
+        </section>
       </section>
     </main>
   );
-}
-"""
+}}
+'''
+
+
+def _styles() -> str:
+    return """body{margin:0;background:#0b1020;color:#eef2ff;font-family:Inter,system-ui,Arial}.app{max-width:1100px;margin:auto;padding:24px}.hero,.card{background:#151b33;border:1px solid #2a335a;border-radius:18px;padding:20px;margin:16px 0}.eyebrow{color:#94a3ff;text-transform:uppercase;letter-spacing:.12em;font-size:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}input,textarea{width:100%;box-sizing:border-box;margin:8px 0;padding:12px;border-radius:12px;border:1px solid #33406e;background:#090d1a;color:white}textarea{min-height:120px}button{background:#6d7cff;color:white;border:0;border-radius:12px;padding:10px 14px;cursor:pointer}.chips{display:flex;gap:8px;flex-wrap:wrap}.chips span{background:#25305c;border:1px solid #4453a4;border-radius:999px;padding:7px 10px}.item{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #273052;padding:10px 0}.item p{margin:.25rem 0;color:#cbd5e1}.error{color:#ff9f9f}@media(max-width:750px){.grid{grid-template-columns:1fr}.app{padding:14px}}"""
 
 
 def _static_file(path: str, spec: ProjectSpec) -> Optional[str]:
-    if path == "README.md":
-        return f"""# {spec.app_name}\n\n{spec.goal}\n\n## Stack\n\n{spec.stack}\n\n## How to use\n\nCreate a spec, build files, steer with extra instructions, validate, then export the zip.\n"""
+    if path == "backend/main.py":
+        return _backend_main(spec)
+    if path == "backend/requirements.txt":
+        return "fastapi==0.111.0\nuvicorn[standard]==0.30.1\npydantic==2.7.4\n"
     if path == "frontend/package.json":
-        return '{"scripts":{"dev":"vite --host 0.0.0.0","build":"vite build","preview":"vite preview"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","react":"latest","react-dom":"latest","lucide-react":"latest"},"devDependencies":{}}'
+        return '{"scripts":{"dev":"vite --host 0.0.0.0","build":"vite build","preview":"vite preview"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","react":"latest","react-dom":"latest"},"devDependencies":{}}'
+    if path == "frontend/index.html":
+        return '<div id="root"></div><script type="module" src="/src/main.jsx"></script>'
     if path == "frontend/src/App.jsx":
-        return _static_app_jsx()
+        return _app_jsx(spec)
     if path == "frontend/src/main.jsx":
         return "import React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport App from './App.jsx';\nimport './styles.css';\n\ncreateRoot(document.getElementById('root')).render(<App />);\n"
     if path == "frontend/src/styles.css":
-        return "body{margin:0;background:#0b1020;color:#e8ecff;font-family:Inter,system-ui,Arial}.app{padding:24px;max-width:1200px;margin:auto}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:#151b33;border:1px solid #2a335a;border-radius:16px;padding:16px;margin:16px 0}textarea,input{background:#090d1a;color:#fff;border:1px solid #33406e;border-radius:10px;padding:10px;box-sizing:border-box}textarea{width:100%;min-height:120px}button{background:#6d7cff;color:white;border:0;border-radius:10px;padding:10px 14px;margin:4px;cursor:pointer}.log{white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:13px}.file{padding:6px;border-bottom:1px solid #273052}.bad{color:#ff9f9f}.ok{color:#93f5b5}"
+        return _styles()
+    if path == "README.md":
+        return f"# {spec.app_name}\n\n{spec.goal}\n\n## Run backend\n\n```bash\ncd backend\npip install -r requirements.txt\nuvicorn main:app --reload --port 8000\n```\n\n## Run frontend\n\n```bash\ncd frontend\nnpm install\nnpm run dev\n```\n"
     return None
 
 
@@ -218,42 +281,27 @@ def ai_generate_file(path: str, spec: ProjectSpec, previous_errors: Optional[Lis
     api_key = get_openai_key()
     if not api_key:
         return None
-    required = REQUIRED_NAMES.get(path, [])
-    error_text = "\n".join(previous_errors or [])
     try:
         from openai import OpenAI
-
         client = OpenAI(api_key=api_key)
         prompt = f"""
-You are Codem8s, a strict full-stack code builder.
-Write one complete file only.
-
-Locked app spec:
-app_name: {spec.app_name}
-goal: {spec.goal}
-stack: {spec.stack}
-features: {spec.features}
-manifest: {spec.files}
-
+Write one complete file for this generated application.
+Application goal: {spec.goal}
+Stack: {spec.stack}
+Features: {spec.features}
+Manifest: {spec.files}
 Target file: {path}
 Purpose: {spec.files.get(path, 'project file')}
-Names that must exist in this file: {required}
-Earlier validation errors to fix: {error_text or 'none'}
-
-Rules:
-- Return only the file content in one code block.
-- No empty shell functions.
-- No fake behaviour.
-- Python must parse.
-- Match the target file and the locked manifest.
+Validation errors to fix: {previous_errors or []}
+Return only file content. No placeholders. No TODO. No stubs.
 """.strip()
         response = client.chat.completions.create(
             model=get_openai_model(),
             messages=[
-                {"role": "system", "content": "You write complete runnable files that satisfy exact validation rules."},
+                {"role": "system", "content": "You write complete project files. You never use placeholder text."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.1,
+            temperature=0.2,
             max_tokens=4000,
         )
         return _extract_code_block(response.choices[0].message.content or "")
@@ -262,9 +310,6 @@ Rules:
 
 
 def generate_file(path: str, spec: ProjectSpec, use_ai: bool = True, previous_errors: Optional[List[str]] = None) -> str:
-    core = _core_file(path)
-    if core is not None:
-        return core
     static = _static_file(path, spec)
     if static is not None:
         return static
