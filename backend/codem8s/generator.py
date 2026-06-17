@@ -126,10 +126,11 @@ def app_jsx(spec: ProjectSpec) -> str:
         imports.append("import ProfilePanel from './ProfilePanel.jsx';")
     if has_dashboard:
         imports.append("import Dashboard from './Dashboard.jsx';")
+    import_text = "\n".join(imports)
     profile = "{profile ? <p className='notice'>Profile: {profile.email}</p> : <ProfilePanel onSave={setProfile} />}" if has_profile else ""
     dashboard = "<Dashboard items={items} />" if has_dashboard else ""
     return f'''import React, {{ useEffect, useState }} from 'react';
-{"\n".join(imports)}
+{import_text}
 const API = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 export default function App() {{
