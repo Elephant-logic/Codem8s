@@ -14,7 +14,6 @@ from .agent_build_repair import real_build_repair_project
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 PROJECTS: dict[str, BuildState] = {}
-
 MAX_BUILD_ALL_STEPS = 50
 
 
@@ -39,7 +38,6 @@ def build_one_file(state: BuildState) -> bool:
     item = pending[0]
     content = generate_file(item.path, state.spec, use_ai=state.use_ai, previous_errors=item.errors)
     ok, errors = validate_file(item.path, content, state.spec.files)
-
     item.content = content if ok else ""
     item.errors = errors
     item.status = "valid" if ok else "rejected"
@@ -53,7 +51,6 @@ def apply_repaired_contents(state: BuildState, repaired: dict[str, str]) -> int:
     for path, content in repaired.items():
         if path not in state.files:
             state.files[path] = FileSpec(path=path, purpose=state.spec.files.get(path, "repaired project file"))
-
         item = state.files[path]
         if item.content != content:
             ok, errors = validate_file(path, content, state.spec.files)
@@ -76,7 +73,6 @@ def repair_whole_project(state: BuildState) -> None:
     contents = current_contents(state)
     if not contents:
         return
-
     try:
         repaired = repair_project(state.spec, contents)
         changed = apply_repaired_contents(state, repaired)
@@ -85,31 +81,40 @@ def repair_whole_project(state: BuildState) -> None:
         state.logs.append(f"Whole-project quality repair skipped: {exc}")
 
 
-def real_build_check_and_repair(state: BuildState) -> None:
+def real_build_failed(logs: list[str]) -> bool:
+    text = "\n".join(logs).lower()
+    return "remaining build problems" in text or "could not repair" in text or "repair failed" in text
+
+
+def real_build_check_and_repair(state: BuildState) -> bool:
     contents = current_contents(state)
     if not contents:
-        return
-
+        return False
     try:
-        repaired, logs = real_build_repair_project(state.spec, contents, max_rounds=3)
+        result = real_build_repair_project(state.spec, contents, max_rounds=6)
+        if len(result) == 3:
+            repaired, logs, ok = result
+        else:
+            repaired, logs = result
+            ok = not real_build_failed(logs)
         changed = apply_repaired_contents(state, repaired)
         state.logs.extend(logs)
         state.logs.append(f"Real build repair updated {changed} file(s)" if changed else "Real build repair checked")
+        if not ok:
+            state.status = "invalid"
+            state.logs.append("Project invalid: real npm/Python build did not pass")
+        return ok
     except Exception as exc:
-        state.logs.append(f"Real build repair skipped: {exc}")
+        state.status = "invalid"
+        state.logs.append(f"Real build repair failed: {exc}")
+        return False
 
 
 @app.post("/projects")
 def create_project(req: BuildRequest) -> BuildState:
     spec = build_spec(req.idea, req.stack)
     files = {path: FileSpec(path=path, purpose=purpose) for path, purpose in spec.files.items()}
-    state = BuildState(
-        project_id=str(uuid4()),
-        use_ai=req.use_ai,
-        spec=spec,
-        files=files,
-        logs=["Spec locked", f"AI generation: {'on' if req.use_ai else 'off'}"],
-    )
+    state = BuildState(project_id=str(uuid4()), use_ai=req.use_ai, spec=spec, files=files, logs=["Spec locked", f"AI generation: {'on' if req.use_ai else 'off'}"])
     PROJECTS[state.project_id] = state
     return state
 
@@ -139,7 +144,6 @@ def build_all(project_id: str) -> BuildState:
     if state.status == "paused":
         state.logs.append("Resume before building all")
         return state
-
     state.status = "building"
     for _ in range(MAX_BUILD_ALL_STEPS):
         progressed = build_one_file(state)
@@ -147,11 +151,10 @@ def build_all(project_id: str) -> BuildState:
             break
         if not progressed:
             break
-
     if state.status == "complete":
         repair_whole_project(state)
-        real_build_check_and_repair(state)
-
+        if real_build_check_and_repair(state):
+            state.status = "valid"
     return state
 
 
@@ -176,25 +179,19 @@ def resume_project(project_id: str) -> BuildState:
 def validate_project(project_id: str) -> BuildState:
     state = get_project(project_id)
     repair_whole_project(state)
-    real_build_check_and_repair(state)
+    build_ok = real_build_check_and_repair(state)
     contents = current_contents(state)
     ok, errors = validate_project_against_spec(contents, state.spec.files)
-    state.status = "valid" if ok else "invalid"
-    state.logs.extend(errors or ["Project valid"])
+    state.status = "valid" if ok and build_ok else "invalid"
+    state.logs.extend(errors or (["Project valid"] if build_ok else ["Project invalid: real build failed"]))
     return state
 
 
 @app.get("/projects/{project_id}/export")
 def export(project_id: str):
     state = get_project(project_id)
-
-    # Export is deterministic. Build/Validate must do repair first.
-    if state.status not in {"valid", "complete"}:
-        contents = current_contents(state)
-        ok, errors = validate_project_against_spec(contents, state.spec.files)
-        if not ok:
-            raise HTTPException(400, "; ".join(errors) if errors else "Project is not valid")
-
+    if state.status != "valid":
+        raise HTTPException(400, "Project is not valid. Run Build All/Validate until the real build passes.")
     path = export_project(state)
     safe_name = state.spec.app_name.replace(" ", "_")
     return FileResponse(path, filename=f"{safe_name}.zip")
