@@ -1,6 +1,9 @@
 from __future__ import annotations
-import json, re
+
+import json
+import re
 from typing import Any
+
 from .models import ProjectSpec
 from .agent_llm import chat_json
 
@@ -13,86 +16,58 @@ def title_from_idea(idea: str) -> str:
     return " ".join(part.capitalize() for part in slug(idea).split("-")) or "Generated App"
 
 
+def safe_component_name(name: str) -> str:
+    raw = re.sub(r"[^a-zA-Z0-9]+", " ", name).title().replace(" ", "")
+    return raw or "Generated"
+
+
 def fallback_blueprint(idea: str) -> dict[str, Any]:
     text = idea.lower()
-    if any(w in text for w in ["game", "snake", "platform", "arcade", "canvas", "puzzle", "tower defense"]):
-        pages = [
-            {"name": "Main Menu", "purpose": "start and options"},
-            {"name": "Game", "purpose": "playable game scene"},
-            {"name": "Game Over", "purpose": "final score and restart"},
-        ]
+    is_game = any(w in text for w in ["game", "snake", "platform", "arcade", "canvas", "puzzle", "tower defense"])
+    if is_game:
         return {
             "app_name": title_from_idea(idea),
             "goal": idea,
             "kind": "game",
             "runtime": "react-vite-canvas",
             "needs_backend": False,
-            "pages": pages,
+            "pages": [
+                {"name": "Main Menu", "purpose": "start/options"},
+                {"name": "Game", "purpose": "playable scene"},
+                {"name": "Game Over", "purpose": "restart/final score"},
+            ],
             "entities": [],
             "systems": [],
             "frontend_files": [],
             "backend_files": [],
+            "dependency_topology": {},
             "notes": ["fallback game blueprint"],
         }
 
     if any(w in text for w in ["crm", "lead", "pipeline", "sales"]):
-        entities = [
-            {"name": "leads", "label": "Leads", "fields": [
-                {"name": "name", "label": "Lead name", "type": "text", "required": True},
-                {"name": "company", "label": "Company", "type": "text"},
-                {"name": "email", "label": "Email", "type": "email"},
-                {"name": "stage", "label": "Stage", "type": "select", "options": ["lead", "contacted", "proposal", "won", "lost"]},
-                {"name": "next_action", "label": "Next action", "type": "text"},
-                {"name": "notes", "label": "Notes", "type": "textarea"}]},
-            {"name": "companies", "label": "Companies", "fields": [
-                {"name": "name", "label": "Company", "type": "text", "required": True},
-                {"name": "contact", "label": "Contact", "type": "text"},
-                {"name": "status", "label": "Status", "type": "select", "options": ["prospect", "active", "lost"]}]},
-            {"name": "tasks", "label": "Tasks", "fields": [
-                {"name": "title", "label": "Task", "type": "text", "required": True},
-                {"name": "due", "label": "Due", "type": "date"},
-                {"name": "status", "label": "Status", "type": "select", "options": ["todo", "doing", "done"]}]},
-        ]
         pages = ["Dashboard", "Leads", "Pipeline", "Companies", "Tasks"]
+        entities = [
+            {"name": "leads", "label": "Leads"},
+            {"name": "companies", "label": "Companies"},
+            {"name": "tasks", "label": "Tasks"},
+        ]
     elif any(w in text for w in ["booking", "appointment", "reservation", "calendar"]):
-        entities = [
-            {"name": "appointments", "label": "Appointments", "fields": [
-                {"name": "customer", "label": "Customer", "type": "text", "required": True},
-                {"name": "service", "label": "Service", "type": "text", "required": True},
-                {"name": "date", "label": "Date", "type": "date"},
-                {"name": "status", "label": "Status", "type": "select", "options": ["booked", "confirmed", "completed", "cancelled"]}]},
-            {"name": "customers", "label": "Customers", "fields": [
-                {"name": "name", "label": "Name", "type": "text", "required": True},
-                {"name": "phone", "label": "Phone", "type": "text"},
-                {"name": "email", "label": "Email", "type": "email"}]},
-            {"name": "services", "label": "Services", "fields": [
-                {"name": "name", "label": "Service", "type": "text", "required": True},
-                {"name": "duration", "label": "Duration", "type": "text"},
-                {"name": "price", "label": "Price", "type": "number"}]},
-        ]
         pages = ["Dashboard", "Appointments", "Calendar", "Customers", "Services"]
-    elif any(w in text for w in ["inventory", "stock", "warehouse", "sku"]):
         entities = [
-            {"name": "products", "label": "Products", "fields": [
-                {"name": "product", "label": "Product", "type": "text", "required": True},
-                {"name": "sku", "label": "SKU", "type": "text"},
-                {"name": "quantity", "label": "Quantity", "type": "number"},
-                {"name": "status", "label": "Stock state", "type": "select", "options": ["in_stock", "low", "ordered", "discontinued"]}]},
-            {"name": "suppliers", "label": "Suppliers", "fields": [
-                {"name": "name", "label": "Supplier", "type": "text", "required": True},
-                {"name": "contact", "label": "Contact", "type": "text"}]},
-            {"name": "movements", "label": "Movements", "fields": [
-                {"name": "product", "label": "Product", "type": "text", "required": True},
-                {"name": "change", "label": "Quantity change", "type": "number"},
-                {"name": "reason", "label": "Reason", "type": "text"}]},
+            {"name": "appointments", "label": "Appointments"},
+            {"name": "customers", "label": "Customers"},
+            {"name": "services", "label": "Services"},
         ]
+    elif any(w in text for w in ["inventory", "stock", "warehouse", "sku"]):
         pages = ["Dashboard", "Products", "Stock", "Suppliers", "Movements"]
+        entities = [
+            {"name": "products", "label": "Products"},
+            {"name": "suppliers", "label": "Suppliers"},
+            {"name": "movements", "label": "Movements"},
+        ]
     else:
-        entities = [{"name": "items", "label": "Items", "fields": [
-            {"name": "title", "label": "Title", "type": "text", "required": True},
-            {"name": "status", "label": "Status", "type": "select", "options": ["active", "paused", "done"]},
-            {"name": "notes", "label": "Notes", "type": "textarea"}]}]
         pages = ["Dashboard", "Items"]
+        entities = [{"name": "items", "label": "Items"}]
 
     return {
         "app_name": title_from_idea(idea),
@@ -104,20 +79,35 @@ def fallback_blueprint(idea: str) -> dict[str, Any]:
         "entities": entities,
         "frontend_files": [],
         "backend_files": [],
+        "dependency_topology": {},
         "notes": ["fallback business blueprint"],
     }
 
 
 def plan_with_api(idea: str) -> dict[str, Any] | None:
     system = """
-You are Codem8s Planner. Return JSON only. Think first. Do not default to CRUD.
-Plan architecture, pages, entities, systems, workflows, and files.
+You are Codem8s Planner. Return JSON only.
+Think like an architect before code generation.
+Do not default to CRUD.
+Do not make a random file list.
 
-Important:
-- Do not plan Unity/Godot unless the output files are actually Unity/Godot files.
-- For browser games use runtime react-vite-canvas or react-vite-webgl.
-- For large games/tools, include many files in frontend_files/backend_files, not a tiny skeleton.
-- Required keys: app_name, goal, kind, runtime, needs_backend, pages, entities, systems, frontend_files, backend_files, notes.
+Required keys:
+app_name, goal, kind, runtime, needs_backend, pages, entities, systems, frontend_files, backend_files, dependency_topology, notes.
+
+dependency_topology must be a map:
+{
+  "file/path.js": {
+    "imports": ["other/file.js"],
+    "exports": ["nameOne", "nameTwo"],
+    "role": "plain description"
+  }
+}
+
+Rules:
+- Browser games should use react-vite-canvas or react-vite-webgl, not Unity/Godot.
+- .js files are plain modules only.
+- .jsx files are UI/scene/component files only.
+- Plan leaves first: data/utils/entities -> systems -> game modules -> UI -> scenes -> App.
 """
     return chat_json(system, f"Plan this app fully before code generation:\n{idea}", temperature=0.2)
 
@@ -125,12 +115,10 @@ Important:
 def normalize_blueprint(raw: dict[str, Any] | None, idea: str) -> dict[str, Any]:
     fallback = fallback_blueprint(idea)
     bp = raw if isinstance(raw, dict) else fallback
-    for k, v in fallback.items():
-        bp.setdefault(k, v)
+    for key, value in fallback.items():
+        bp.setdefault(key, value)
     if not isinstance(bp.get("pages"), list) or not bp["pages"]:
         bp["pages"] = fallback["pages"]
-    if bp.get("kind") != "game" and (not isinstance(bp.get("entities"), list) or not bp["entities"]):
-        bp["entities"] = fallback["entities"]
     if bp.get("kind") == "game" or bp.get("needs_backend") is False:
         bp["needs_backend"] = False
         if str(bp.get("runtime", "")).lower() in {"unity", "godot"}:
@@ -139,8 +127,7 @@ def normalize_blueprint(raw: dict[str, Any] | None, idea: str) -> dict[str, Any]
 
 
 def blueprint_from_idea(idea: str, use_api: bool = True) -> dict[str, Any]:
-    raw = plan_with_api(idea) if use_api else None
-    return normalize_blueprint(raw, idea)
+    return normalize_blueprint(plan_with_api(idea) if use_api else None, idea)
 
 
 def blueprint_from_spec(spec: ProjectSpec) -> dict[str, Any]:
@@ -158,158 +145,156 @@ def add(files: dict[str, str], path: str, purpose: str) -> None:
         files[path] = purpose
 
 
-def safe_component_name(name: str) -> str:
-    raw = re.sub(r"[^a-zA-Z0-9]+", " ", name).title().replace(" ", "")
-    return raw or "Generated"
+def topo_role(bp: dict[str, Any], path: str, fallback: str) -> str:
+    topo = bp.get("dependency_topology") or {}
+    meta = topo.get(path) if isinstance(topo, dict) else None
+    if isinstance(meta, dict):
+        imports = meta.get("imports") or []
+        exports = meta.get("exports") or []
+        role = meta.get("role") or fallback
+        return f"{role}. Topology: imports={imports}; exports={exports}. Follow this contract exactly."
+    return fallback
 
 
 def add_blueprint_requested_files(files: dict[str, str], bp: dict[str, Any]) -> None:
     for path in bp.get("frontend_files") or []:
         if isinstance(path, str) and path.startswith("frontend/"):
-            add(files, path, "blueprint requested frontend file")
+            add(files, path, topo_role(bp, path, "blueprint requested frontend file"))
     for path in bp.get("backend_files") or []:
         if isinstance(path, str) and path.startswith("backend/"):
-            add(files, path, "blueprint requested backend file")
+            add(files, path, topo_role(bp, path, "blueprint requested backend file"))
+
+
+def tower_defense_paths() -> list[tuple[str, str, list[str], list[str]]]:
+    return [
+        ("frontend/package.json", "frontend package", [], []),
+        ("frontend/index.html", "html entry", [], []),
+        ("README.md", "instructions", [], []),
+        ("frontend/src/styles.css", "polished responsive styles", [], []),
+        ("frontend/src/data/towers.js", "tower definitions", [], ["TOWER_TYPES"]),
+        ("frontend/src/data/enemies.js", "enemy definitions", [], ["ENEMY_TYPES"]),
+        ("frontend/src/data/waves.js", "wave definitions", [], ["WAVES"]),
+        ("frontend/src/data/maps.js", "map paths and build zones", [], ["MAPS"]),
+        ("frontend/src/utils/math.js", "math helpers", [], ["distance", "clamp", "lerp"]),
+        ("frontend/src/utils/path.js", "path helpers", ["frontend/src/utils/math.js"], ["pointOnPath", "advanceAlongPath"]),
+        ("frontend/src/entities/Tower.js", "tower entity model", ["frontend/src/data/towers.js"], ["createTower", "upgradeTower"]),
+        ("frontend/src/entities/Enemy.js", "enemy entity model", ["frontend/src/data/enemies.js"], ["createEnemy"]),
+        ("frontend/src/entities/Projectile.js", "projectile entity model", [], ["createProjectile"]),
+        ("frontend/src/entities/Wave.js", "wave model", ["frontend/src/data/waves.js"], ["getWave"]),
+        ("frontend/src/systems/PathSystem.js", "waypoint movement system", ["frontend/src/utils/path.js"], ["updateEnemyPath"]),
+        ("frontend/src/systems/EconomySystem.js", "score currency lives economy", [], ["applyReward", "spendCurrency", "loseLife"]),
+        ("frontend/src/systems/UpgradeSystem.js", "tower upgrade rules", ["frontend/src/entities/Tower.js", "frontend/src/systems/EconomySystem.js"], ["canUpgrade", "applyUpgrade"]),
+        ("frontend/src/systems/PlacementSystem.js", "click placement validation", ["frontend/src/data/maps.js", "frontend/src/entities/Tower.js", "frontend/src/utils/math.js"], ["canPlaceTower", "placeTower"]),
+        ("frontend/src/systems/CombatSystem.js", "tower targeting and damage", ["frontend/src/utils/math.js", "frontend/src/entities/Projectile.js"], ["updateCombat"]),
+        ("frontend/src/systems/WaveManager.js", "wave spawning and progression", ["frontend/src/entities/Enemy.js", "frontend/src/entities/Wave.js"], ["createWaveState", "updateWave"]),
+        ("frontend/src/systems/ParticleSystem.js", "hit and explosion particles", [], ["createHitParticle", "updateParticles"]),
+        ("frontend/src/game/constants.js", "game constants", [], ["GAME_WIDTH", "GAME_HEIGHT", "TICK_RATE"]),
+        ("frontend/src/game/collision.js", "collision and hit testing", ["frontend/src/utils/math.js"], ["circleHit", "pointInRect"]),
+        ("frontend/src/game/input.js", "keyboard pointer input", [], ["createInputController"]),
+        ("frontend/src/game/audio.js", "audio helpers", [], ["playSound"]),
+        ("frontend/src/game/gameState.js", "initial game state and reducers", ["frontend/src/data/maps.js"], ["createInitialGameState"]),
+        ("frontend/src/game/useGameLoop.js", "requestAnimationFrame loop hook", [], ["useGameLoop"]),
+        ("frontend/src/game/rendering.js", "canvas rendering helpers", ["frontend/src/game/constants.js"], ["renderGame"]),
+        ("frontend/src/ui/Button.jsx", "reusable button", [], ["Button"]),
+        ("frontend/src/ui/Hud.jsx", "score lives currency HUD", [], ["Hud"]),
+        ("frontend/src/ui/TowerPalette.jsx", "tower selector", ["frontend/src/data/towers.js"], ["TowerPalette"]),
+        ("frontend/src/ui/UpgradePanel.jsx", "selected tower upgrades", ["frontend/src/systems/UpgradeSystem.js"], ["UpgradePanel"]),
+        ("frontend/src/ui/WavePanel.jsx", "wave status controls", [], ["WavePanel"]),
+        ("frontend/src/ui/GameStats.jsx", "score wave lives display", [], ["GameStats"]),
+        ("frontend/src/game/GameCanvas.jsx", "main canvas game scene", ["frontend/src/game/gameState.js", "frontend/src/game/useGameLoop.js", "frontend/src/game/rendering.js", "frontend/src/systems/WaveManager.js", "frontend/src/systems/PathSystem.js", "frontend/src/systems/CombatSystem.js", "frontend/src/systems/PlacementSystem.js", "frontend/src/systems/UpgradeSystem.js", "frontend/src/ui/Hud.jsx", "frontend/src/ui/TowerPalette.jsx", "frontend/src/ui/UpgradePanel.jsx", "frontend/src/ui/WavePanel.jsx"], ["GameCanvas"]),
+        ("frontend/src/scenes/MainMenu.jsx", "main menu scene", ["frontend/src/ui/Button.jsx"], ["MainMenu"]),
+        ("frontend/src/scenes/GameScene.jsx", "playable game scene wrapper", ["frontend/src/game/GameCanvas.jsx"], ["GameScene"]),
+        ("frontend/src/scenes/GameOver.jsx", "game over scene", ["frontend/src/ui/Button.jsx"], ["GameOver"]),
+        ("frontend/src/App.jsx", "root state router", ["frontend/src/scenes/MainMenu.jsx", "frontend/src/scenes/GameScene.jsx", "frontend/src/scenes/GameOver.jsx"], ["App"]),
+        ("frontend/src/main.jsx", "react entry", ["frontend/src/App.jsx", "frontend/src/styles.css"], []),
+    ]
+
+
+def add_topology_paths(files: dict[str, str], bp: dict[str, Any], paths: list[tuple[str, str, list[str], list[str]]]) -> None:
+    topo = bp.setdefault("dependency_topology", {})
+    for path, role, imports, exports in paths:
+        topo[path] = {"imports": imports, "exports": exports, "role": role}
+        add(files, path, topo_role(bp, path, role))
 
 
 def add_game_architecture_files(files: dict[str, str], bp: dict[str, Any]) -> None:
     goal = str(bp.get("goal", "")).lower()
     spec_text = json.dumps(bp).lower()
-
-    add(files, "frontend/src/App.jsx", "game app shell and state routing")
-    add(files, "frontend/src/styles.css", "polished game styling")
-    add(files, "frontend/src/game/GameCanvas.jsx", "main canvas game scene")
-    add(files, "frontend/src/game/useGameLoop.js", "requestAnimationFrame game loop")
-    add(files, "frontend/src/game/input.js", "keyboard pointer input")
-    add(files, "frontend/src/game/collision.js", "collision and hit testing")
-    add(files, "frontend/src/game/gameState.js", "initial game state and reducers")
-    add(files, "frontend/src/game/constants.js", "game constants and balancing")
-    add(files, "frontend/src/game/rendering.js", "canvas rendering helpers")
-    add(files, "frontend/src/game/audio.js", "audio and sound helpers")
-
-    add(files, "frontend/src/scenes/MainMenu.jsx", "main menu scene")
-    add(files, "frontend/src/scenes/GameScene.jsx", "playable game scene wrapper")
-    add(files, "frontend/src/scenes/GameOver.jsx", "game over and restart scene")
-    add(files, "frontend/src/ui/Hud.jsx", "score lives currency HUD")
-    add(files, "frontend/src/ui/Button.jsx", "reusable polished button")
-
     if "tower defense" in goal or "tower defense" in spec_text:
-        tower_files = {
-            "frontend/src/entities/Tower.js": "tower entity model and upgrades",
-            "frontend/src/entities/Enemy.js": "enemy entity model",
-            "frontend/src/entities/Projectile.js": "projectile entity model",
-            "frontend/src/entities/Wave.js": "wave definition model",
-            "frontend/src/systems/WaveManager.js": "wave spawning and progression",
-            "frontend/src/systems/PathSystem.js": "waypoint path movement",
-            "frontend/src/systems/CombatSystem.js": "tower targeting and damage",
-            "frontend/src/systems/EconomySystem.js": "currency score lives economy",
-            "frontend/src/systems/UpgradeSystem.js": "tower upgrade rules",
-            "frontend/src/systems/PlacementSystem.js": "click to place tower validation",
-            "frontend/src/systems/ParticleSystem.js": "hit and explosion particles",
-            "frontend/src/ui/TowerPalette.jsx": "tower selection palette",
-            "frontend/src/ui/UpgradePanel.jsx": "selected tower upgrades",
-            "frontend/src/ui/WavePanel.jsx": "wave status controls",
-            "frontend/src/ui/GameStats.jsx": "score wave lives display",
-            "frontend/src/data/towers.js": "tower definitions",
-            "frontend/src/data/enemies.js": "enemy definitions",
-            "frontend/src/data/waves.js": "wave definitions",
-            "frontend/src/data/maps.js": "map paths and build zones",
-            "frontend/src/utils/math.js": "math helpers",
-            "frontend/src/utils/path.js": "path helpers",
-        }
-        for path, purpose in tower_files.items():
-            add(files, path, purpose)
+        add_topology_paths(files, bp, tower_defense_paths())
+        return
 
-    elif "snake" in goal or "snake" in spec_text:
-        snake_files = {
-            "frontend/src/entities/Snake.js": "snake body model",
-            "frontend/src/entities/Food.js": "food spawning model",
-            "frontend/src/systems/SnakeSystem.js": "snake movement growth collision",
-            "frontend/src/systems/ScoreSystem.js": "score and high score",
-            "frontend/src/ui/ScoreBoard.jsx": "snake score display",
-        }
-        for path, purpose in snake_files.items():
-            add(files, path, purpose)
-
-    else:
-        for system in bp.get("systems") or []:
-            if isinstance(system, dict):
-                name = safe_component_name(str(system.get("name", "System")))
-                add(files, f"frontend/src/systems/{name}.js", str(system.get("purpose", "planned system")))
+    add_topology_paths(files, bp, [
+        ("frontend/package.json", "frontend package", [], []),
+        ("frontend/index.html", "html entry", [], []),
+        ("README.md", "instructions", [], []),
+        ("frontend/src/styles.css", "styles", [], []),
+        ("frontend/src/game/constants.js", "game constants", [], ["GAME_WIDTH", "GAME_HEIGHT"]),
+        ("frontend/src/game/input.js", "input module", [], ["createInputController"]),
+        ("frontend/src/game/collision.js", "collision module", [], ["checkCollision"]),
+        ("frontend/src/game/useGameLoop.js", "game loop hook", [], ["useGameLoop"]),
+        ("frontend/src/game/GameCanvas.jsx", "main game scene", ["frontend/src/game/useGameLoop.js", "frontend/src/game/input.js", "frontend/src/game/collision.js"], ["GameCanvas"]),
+        ("frontend/src/scenes/MainMenu.jsx", "main menu", [], ["MainMenu"]),
+        ("frontend/src/scenes/GameOver.jsx", "game over", [], ["GameOver"]),
+        ("frontend/src/App.jsx", "root router", ["frontend/src/scenes/MainMenu.jsx", "frontend/src/game/GameCanvas.jsx", "frontend/src/scenes/GameOver.jsx"], ["App"]),
+        ("frontend/src/main.jsx", "react entry", ["frontend/src/App.jsx", "frontend/src/styles.css"], []),
+    ])
 
 
 def add_business_architecture_files(files: dict[str, str], bp: dict[str, Any]) -> None:
-    add(files, "backend/main.py", "FastAPI application")
-    add(files, "backend/store.py", "SQLite persistence")
     add(files, "backend/requirements.txt", "backend dependencies")
-    add(files, "frontend/src/components/Nav.jsx", "navigation")
-    add(files, "frontend/src/components/Dashboard.jsx", "dashboard")
-    add(files, "frontend/src/components/EntityPage.jsx", "entity page")
-    add(files, "frontend/src/components/FormBuilder.jsx", "dynamic form builder")
+    add(files, "backend/store.py", "SQLite persistence")
+    add(files, "backend/main.py", "FastAPI application")
+    add(files, "frontend/package.json", "frontend package")
+    add(files, "frontend/index.html", "html entry")
     add(files, "frontend/src/api/client.js", "API client")
     add(files, "frontend/src/ui/Card.jsx", "card UI component")
     add(files, "frontend/src/ui/Modal.jsx", "modal UI component")
     add(files, "frontend/src/ui/StatusPill.jsx", "status display component")
-
+    add(files, "frontend/src/components/FormBuilder.jsx", "dynamic form builder")
+    add(files, "frontend/src/components/Dashboard.jsx", "dashboard")
+    add(files, "frontend/src/components/EntityPage.jsx", "entity page")
+    add(files, "frontend/src/components/Nav.jsx", "navigation")
     for page in bp.get("pages") or []:
         if isinstance(page, dict):
-            name = safe_component_name(str(page.get("name", "Page")))
-            add(files, f"frontend/src/pages/{name}.jsx", str(page.get("purpose", "planned page")))
-
+            add(files, f"frontend/src/pages/{safe_component_name(str(page.get('name', 'Page')))}.jsx", str(page.get("purpose", "planned page")))
     for entity in bp.get("entities") or []:
         if isinstance(entity, dict):
             name = safe_component_name(str(entity.get("name", "Entity")))
             add(files, f"frontend/src/entities/{name}.js", str(entity.get("label", "entity model")))
             add(files, f"backend/routes/{name.lower()}.py", f"API routes for {name}")
+    add(files, "frontend/src/App.jsx", "app shell")
+    add(files, "frontend/src/main.jsx", "react entry")
+    add(files, "frontend/src/styles.css", "styles")
+    add(files, "README.md", "instructions")
 
 
 def files_for_blueprint(bp: dict[str, Any]) -> dict[str, str]:
-    files: dict[str, str] = {
-        "frontend/package.json": "frontend package",
-        "frontend/index.html": "html entry",
-        "frontend/src/main.jsx": "react entry",
-        "frontend/src/App.jsx": "app shell",
-        "frontend/src/styles.css": "styles",
-        "README.md": "instructions",
-    }
-
+    files: dict[str, str] = {}
     add_blueprint_requested_files(files, bp)
-
     if bp.get("kind") == "game" or bp.get("needs_backend") is False:
         add_game_architecture_files(files, bp)
-        return files
-
-    add_business_architecture_files(files, bp)
+    else:
+        add_business_architecture_files(files, bp)
     return files
 
 
 def build_spec(idea: str, stack: str = "react-fastapi") -> ProjectSpec:
     bp = blueprint_from_idea(idea, use_api=True)
+    files = files_for_blueprint(bp)
     return ProjectSpec(
         app_name=bp["app_name"],
         goal=idea,
         stack=bp.get("runtime", stack),
-        features=[
-            "agent planned blueprint",
-            f"kind: {bp.get('kind')}",
-            "expanded architecture file plan",
-            "api planned once",
-            "files generated from saved blueprint",
-        ],
-        files=files_for_blueprint(bp),
+        features=["agent planned blueprint", f"kind: {bp.get('kind')}", "dependency topology file plan", "api planned once", "files generated from saved blueprint"],
+        files=files,
         change_log=["BLUEPRINT_JSON:" + json.dumps(bp)],
     )
 
 
 def apply_instruction(spec: ProjectSpec, instruction: str) -> ProjectSpec:
     bp = blueprint_from_idea(spec.goal + "\nChange request: " + instruction, use_api=True)
-    spec.features = [
-        "agent replanned blueprint",
-        f"kind: {bp.get('kind')}",
-        "expanded architecture file plan",
-        "api planned once",
-        "files generated from saved blueprint",
-    ]
+    spec.features = ["agent replanned blueprint", f"kind: {bp.get('kind')}", "dependency topology file plan", "api planned once", "files generated from saved blueprint"]
     spec.files = files_for_blueprint(bp)
     spec.change_log.append("INSTRUCTION:" + instruction)
     spec.change_log.append("BLUEPRINT_JSON:" + json.dumps(bp))
