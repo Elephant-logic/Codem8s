@@ -10,6 +10,7 @@ from .exporter import export_project
 from .settings import SettingsIn, SettingsOut, save_settings, settings_status
 from .agent_project_repair import repair_project
 from .agent_build_repair import real_build_repair_project
+from .sandbox import start_sandbox, stop_sandbox, sandbox_status, sandbox_logs
 
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -28,13 +29,11 @@ def build_one_file(state: BuildState) -> bool:
     if state.status == "paused":
         state.logs.append("Build paused")
         return False
-
     pending = [f for f in state.files.values() if f.status != "valid"]
     if not pending:
         state.status = "complete"
         state.logs.append("All files valid")
         return False
-
     item = pending[0]
     content = generate_file(item.path, state.spec, use_ai=state.use_ai, previous_errors=item.errors)
     ok, errors = validate_file(item.path, content, state.spec.files)
@@ -185,6 +184,27 @@ def validate_project(project_id: str) -> BuildState:
     state.status = "valid" if ok and build_ok else "invalid"
     state.logs.extend(errors or (["Project valid"] if build_ok else ["Project invalid: real build failed"]))
     return state
+
+
+@app.post("/projects/{project_id}/sandbox/start")
+def sandbox_start(project_id: str):
+    state = get_project(project_id)
+    return start_sandbox(state)
+
+
+@app.post("/projects/{project_id}/sandbox/stop")
+def sandbox_stop(project_id: str):
+    return stop_sandbox(project_id)
+
+
+@app.get("/projects/{project_id}/sandbox/status")
+def sandbox_get_status(project_id: str):
+    return sandbox_status(project_id)
+
+
+@app.get("/projects/{project_id}/sandbox/logs")
+def sandbox_get_logs(project_id: str, limit: int = 200):
+    return sandbox_logs(project_id, limit=limit)
 
 
 @app.get("/projects/{project_id}/export")
