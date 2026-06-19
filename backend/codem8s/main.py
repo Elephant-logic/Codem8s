@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -122,6 +123,25 @@ def real_build_check_and_repair(state: BuildState) -> bool:
         return False
 
 
+def project_graph(state: BuildState) -> dict:
+    topology = {}
+    for entry in reversed(state.spec.change_log):
+        if entry.startswith("BLUEPRINT_JSON:"):
+            try:
+                topology = json.loads(entry.removeprefix("BLUEPRINT_JSON:")).get("dependency_topology", {})
+            except Exception:
+                topology = {}
+            break
+    nodes = []
+    edges = []
+    for path, item in state.files.items():
+        meta = topology.get(path, {}) if isinstance(topology, dict) else {}
+        nodes.append({"path": path, "status": item.status, "role": meta.get("role") or state.spec.files.get(path, "")})
+        for source in meta.get("imports", []) if isinstance(meta, dict) else []:
+            edges.append({"from": source, "to": path})
+    return {"project_id": state.project_id, "nodes": nodes, "edges": edges}
+
+
 @app.post("/projects")
 def create_project(req: BuildRequest) -> BuildState:
     spec = build_spec(req.idea, req.stack)
@@ -196,6 +216,11 @@ def validate_project(project_id: str) -> BuildState:
     state.status = "valid" if ok and build_ok else "invalid"
     state.logs.extend(errors or (["Project valid"] if build_ok else ["Project invalid: real build failed"]))
     return remember(state)
+
+
+@app.get("/projects/{project_id}/graph")
+def get_graph(project_id: str):
+    return project_graph(get_project(project_id))
 
 
 @app.post("/projects/{project_id}/sandbox/start")
