@@ -12,10 +12,11 @@ from .settings import SettingsIn, SettingsOut, save_settings, settings_status
 from .agent_project_repair import repair_project
 from .agent_build_repair import real_build_repair_project
 from .sandbox import start_sandbox, stop_sandbox, sandbox_status, sandbox_logs
+from .project_store import load_all_projects, load_project, save_project
 
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-PROJECTS: dict[str, BuildState] = {}
+PROJECTS: dict[str, BuildState] = load_all_projects()
 MAX_BUILD_ALL_STEPS = 50
 
 
@@ -23,10 +24,17 @@ class SandboxFixRequest(BaseModel):
     instruction: str = "Fix the current sandbox/build error using the blueprint and dependency topology."
 
 
+def remember(state: BuildState) -> BuildState:
+    PROJECTS[state.project_id] = state
+    save_project(state)
+    return state
+
+
 def get_project(project_id: str) -> BuildState:
-    state = PROJECTS.get(project_id)
+    state = PROJECTS.get(project_id) or load_project(project_id)
     if not state:
-        raise HTTPException(404, "Project not found")
+        raise HTTPException(404, "Project not found. The project may have been created before persistence was enabled; create/build it once more.")
+    PROJECTS[state.project_id] = state
     return state
 
 
@@ -119,8 +127,7 @@ def create_project(req: BuildRequest) -> BuildState:
     spec = build_spec(req.idea, req.stack)
     files = {path: FileSpec(path=path, purpose=purpose) for path, purpose in spec.files.items()}
     state = BuildState(project_id=str(uuid4()), use_ai=req.use_ai, spec=spec, files=files, logs=["Spec locked", f"AI generation: {'on' if req.use_ai else 'off'}"])
-    PROJECTS[state.project_id] = state
-    return state
+    return remember(state)
 
 
 @app.post("/projects/{project_id}/change")
@@ -132,14 +139,14 @@ def change_project(project_id: str, req: ChangeRequest) -> BuildState:
             state.files[path] = FileSpec(path=path, purpose=purpose)
     state.status = "planned"
     state.logs.append(f"Instruction applied: {req.instruction}")
-    return state
+    return remember(state)
 
 
 @app.post("/projects/{project_id}/build-next")
 def build_next(project_id: str) -> BuildState:
     state = get_project(project_id)
     build_one_file(state)
-    return state
+    return remember(state)
 
 
 @app.post("/projects/{project_id}/build-all")
@@ -147,7 +154,7 @@ def build_all(project_id: str) -> BuildState:
     state = get_project(project_id)
     if state.status == "paused":
         state.logs.append("Resume before building all")
-        return state
+        return remember(state)
     state.status = "building"
     for _ in range(MAX_BUILD_ALL_STEPS):
         progressed = build_one_file(state)
@@ -159,7 +166,7 @@ def build_all(project_id: str) -> BuildState:
         repair_whole_project(state)
         if real_build_check_and_repair(state):
             state.status = "valid"
-    return state
+    return remember(state)
 
 
 @app.post("/projects/{project_id}/pause")
@@ -167,7 +174,7 @@ def pause_project(project_id: str) -> BuildState:
     state = get_project(project_id)
     state.status = "paused"
     state.logs.append("Paused")
-    return state
+    return remember(state)
 
 
 @app.post("/projects/{project_id}/resume")
@@ -176,7 +183,7 @@ def resume_project(project_id: str) -> BuildState:
     if state.status == "paused":
         state.status = "planned"
     state.logs.append("Resumed")
-    return state
+    return remember(state)
 
 
 @app.post("/projects/{project_id}/validate")
@@ -188,12 +195,13 @@ def validate_project(project_id: str) -> BuildState:
     ok, errors = validate_project_against_spec(contents, state.spec.files)
     state.status = "valid" if ok and build_ok else "invalid"
     state.logs.extend(errors or (["Project valid"] if build_ok else ["Project invalid: real build failed"]))
-    return state
+    return remember(state)
 
 
 @app.post("/projects/{project_id}/sandbox/start")
 def sandbox_start(project_id: str):
     state = get_project(project_id)
+    save_project(state)
     return start_sandbox(state)
 
 
@@ -226,6 +234,7 @@ def sandbox_fix(project_id: str, req: SandboxFixRequest):
     repair_whole_project(state)
     if real_build_check_and_repair(state):
         state.status = "valid"
+    remember(state)
     return start_sandbox(state)
 
 
@@ -236,6 +245,7 @@ def export(project_id: str):
         raise HTTPException(400, "Project is not valid. Run Build All/Validate until the real build passes.")
     path = export_project(state)
     safe_name = state.spec.app_name.replace(" ", "_")
+    save_project(state)
     return FileResponse(path, filename=f"{safe_name}.zip")
 
 
