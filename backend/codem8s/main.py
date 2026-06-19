@@ -2,6 +2,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from uuid import uuid4
 from .models import BuildRequest, ChangeRequest, BuildState, FileSpec
 from .generator import build_spec, apply_instruction, generate_file
@@ -16,6 +17,10 @@ app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 PROJECTS: dict[str, BuildState] = {}
 MAX_BUILD_ALL_STEPS = 50
+
+
+class SandboxFixRequest(BaseModel):
+    instruction: str = "Fix the current sandbox/build error using the blueprint and dependency topology."
 
 
 def get_project(project_id: str) -> BuildState:
@@ -205,6 +210,23 @@ def sandbox_get_status(project_id: str):
 @app.get("/projects/{project_id}/sandbox/logs")
 def sandbox_get_logs(project_id: str, limit: int = 200):
     return sandbox_logs(project_id, limit=limit)
+
+
+@app.post("/projects/{project_id}/sandbox/fix")
+def sandbox_fix(project_id: str, req: SandboxFixRequest):
+    state = get_project(project_id)
+    info = sandbox_status(project_id)
+    recent = sandbox_logs(project_id, limit=120).get("logs", [])
+    state.logs.append("Sandbox AI fix requested")
+    state.logs.append("User instruction: " + req.instruction)
+    if info.get("last_error"):
+        state.logs.append("Sandbox last error: " + str(info.get("last_error"))[-2000:])
+    if recent:
+        state.logs.append("Sandbox recent logs:\n" + "\n".join(recent[-40:]))
+    repair_whole_project(state)
+    if real_build_check_and_repair(state):
+        state.status = "valid"
+    return start_sandbox(state)
 
 
 @app.get("/projects/{project_id}/export")
