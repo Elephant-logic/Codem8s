@@ -7,6 +7,9 @@ export default function App() {
   const [change, setChange] = useState('');
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [sandboxBusy, setSandboxBusy] = useState(false);
+  const [sandbox, setSandbox] = useState(null);
+  const [sandboxLogLines, setSandboxLogLines] = useState([]);
   const [settings, setSettings] = useState(null);
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('gpt-4o-mini');
@@ -75,6 +78,8 @@ export default function App() {
   }
 
   async function createProject() {
+    setSandbox(null);
+    setSandboxLogLines([]);
     await post('/projects', { idea, use_ai: useAi });
   }
 
@@ -107,6 +112,63 @@ export default function App() {
 
   function exportZip() {
     if (state) window.location = API + `/projects/${state.project_id}/export`;
+  }
+
+  async function startSandbox() {
+    if (!state) return;
+    setSandboxBusy(true);
+    try {
+      const data = await request(`/projects/${state.project_id}/sandbox/start`, { method: 'POST' });
+      setSandbox(data);
+      await refreshSandboxLogs();
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setSandboxBusy(false);
+    }
+  }
+
+  async function stopSandboxRun() {
+    if (!state) return;
+    setSandboxBusy(true);
+    try {
+      const data = await request(`/projects/${state.project_id}/sandbox/stop`, { method: 'POST' });
+      setSandbox(data);
+      await refreshSandboxLogs();
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setSandboxBusy(false);
+    }
+  }
+
+  async function refreshSandboxStatus() {
+    if (!state) return;
+    try {
+      const data = await request(`/projects/${state.project_id}/sandbox/status`);
+      setSandbox(data);
+    } catch (err) {
+      setError(String(err.message || err));
+    }
+  }
+
+  async function refreshSandboxLogs() {
+    if (!state) return;
+    try {
+      const data = await request(`/projects/${state.project_id}/sandbox/logs?limit=300`);
+      setSandboxLogLines(data.logs || []);
+      await refreshSandboxStatus();
+    } catch (err) {
+      setError(String(err.message || err));
+    }
+  }
+
+  async function refreshSandboxAll() {
+    await refreshSandboxLogs();
+  }
+
+  function openPreview() {
+    if (sandbox?.preview_url) window.open(sandbox.preview_url, '_blank', 'noopener,noreferrer');
   }
 
   return (
@@ -158,6 +220,33 @@ export default function App() {
           <pre className="log">{state ? JSON.stringify(state.spec, null, 2) : 'No project yet'}</pre>
         </section>
       </div>
+
+      <section className="card sandbox-card">
+        <div className="split-head">
+          <div>
+            <h2>Live Sandbox</h2>
+            <p>Run the generated project, watch install/build/dev logs, then fix from what actually happened.</p>
+          </div>
+          <div className="status-pills">
+            <span className={sandbox?.running ? 'pill ok-bg' : 'pill'}>{sandbox?.running ? 'Running' : 'Stopped'}</span>
+            <span className={sandbox?.build_ok ? 'pill ok-bg' : 'pill bad-bg'}>{sandbox?.build_ok ? 'Build OK' : 'Build not green'}</span>
+          </div>
+        </div>
+        <div className="row">
+          <button onClick={startSandbox} disabled={!state || sandboxBusy}>Run Sandbox</button>
+          <button onClick={stopSandboxRun} disabled={!state || sandboxBusy}>Stop Sandbox</button>
+          <button onClick={refreshSandboxAll} disabled={!state || sandboxBusy}>Refresh Logs</button>
+          <button onClick={openPreview} disabled={!sandbox?.preview_url}>Open Preview</button>
+        </div>
+        {sandbox && (
+          <div className="sandbox-status">
+            <p><b>Preview:</b> {sandbox.preview_url || 'not started'}</p>
+            <p><b>Root:</b> {sandbox.root || 'not created'}</p>
+            {sandbox.last_error && <pre className="log bad-box">{sandbox.last_error}</pre>}
+          </div>
+        )}
+        <pre className="log sandbox-log">{sandboxLogLines.length ? sandboxLogLines.join('\n') : 'No sandbox logs yet'}</pre>
+      </section>
 
       <section className="card">
         <h2>Files</h2>
