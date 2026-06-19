@@ -30,8 +30,10 @@ export default function App() {
   async function request(url, options = {}) {
     setError('');
     const response = await fetch(API + url, options);
-    const data = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(data?.detail || `Request failed: ${response.status}`);
+    const text = await response.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+    if (!response.ok) throw new Error(data?.detail || text || `Request failed: ${response.status}`);
     return data;
   }
 
@@ -91,7 +93,26 @@ export default function App() {
   }
 
   async function buildAll() {
-    if (state) await post(`/projects/${state.project_id}/build-all`);
+    if (!state) return;
+    setBusy(true);
+    let current = state;
+    try {
+      for (let i = 0; i < 80; i += 1) {
+        const files = Object.values(current.files || {});
+        const pending = files.filter((file) => file.status !== 'valid');
+        if (!pending.length) break;
+        const data = await request(`/projects/${current.project_id}/build-next`, { method: 'POST' });
+        current = data;
+        setState(data);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      const validated = await request(`/projects/${current.project_id}/validate`, { method: 'POST' });
+      setState(validated);
+    } catch (err) {
+      setError(`Build stopped: ${String(err.message || err)}. Press Build All again to continue from saved progress.`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function pauseBuild() {
