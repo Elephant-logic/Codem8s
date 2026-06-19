@@ -176,24 +176,28 @@ export default function App() {
     try {
       const data = await request(`/projects/${state.project_id}/sandbox/status`);
       setSandbox(data);
+      return data;
     } catch (err) {
       setError(String(err.message || err));
+      return null;
     }
   }
 
   async function refreshSandboxLogs() {
-    if (!state) return;
+    if (!state) return null;
     try {
       const data = await request(`/projects/${state.project_id}/sandbox/logs?limit=300`);
       setSandboxLogLines(data.logs || []);
-      await refreshSandboxStatus();
+      const status = await refreshSandboxStatus();
+      return { logs: data.logs || [], status };
     } catch (err) {
       setError(String(err.message || err));
+      return null;
     }
   }
 
   async function fixFromSandbox() {
-    if (!state) return;
+    if (!state) return null;
     setSandboxBusy(true);
     try {
       const data = await request(`/projects/${state.project_id}/sandbox/fix`, {
@@ -204,8 +208,48 @@ export default function App() {
       setSandbox(data);
       await refreshSandboxLogs();
       await validate();
+      return data;
     } catch (err) {
       setError(String(err.message || err));
+      return null;
+    } finally {
+      setSandboxBusy(false);
+    }
+  }
+
+  async function workThroughSandbox() {
+    if (!state) return;
+    setSandboxBusy(true);
+    setError('');
+    let previousSignature = '';
+    try {
+      let current = await request(`/projects/${state.project_id}/sandbox/start`, { method: 'POST' });
+      setSandbox(current);
+      for (let round = 1; round <= 8; round += 1) {
+        const logData = await request(`/projects/${state.project_id}/sandbox/logs?limit=300`);
+        setSandboxLogLines([...(logData.logs || []), `--- Work-through round ${round} ---`]);
+        const signature = String(current?.last_error || '').slice(-1200);
+        if (current?.build_ok) {
+          await validate();
+          setError('');
+          break;
+        }
+        if (signature && signature === previousSignature) {
+          setError('Work-through paused: the same error repeated. Add a steering instruction, then press Work Through again.');
+          break;
+        }
+        previousSignature = signature;
+        current = await request(`/projects/${state.project_id}/sandbox/fix`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instruction: sandboxInstruction }),
+        });
+        setSandbox(current);
+        await refreshSandboxLogs();
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    } catch (err) {
+      setError(`Work-through stopped: ${String(err.message || err)}`);
     } finally {
       setSandboxBusy(false);
     }
@@ -288,7 +332,10 @@ export default function App() {
         </div>
         <h3>AI Fix From Sandbox</h3>
         <textarea value={sandboxInstruction} onChange={(event) => setSandboxInstruction(event.target.value)} placeholder="Tell AI what to try using the command output" />
-        <button onClick={fixFromSandbox} disabled={!state || sandboxBusy}>AI Fix + Re-run</button>
+        <div className="row">
+          <button onClick={fixFromSandbox} disabled={!state || sandboxBusy}>AI Fix + Re-run</button>
+          <button onClick={workThroughSandbox} disabled={!state || sandboxBusy}>Work Through Errors</button>
+        </div>
         {sandbox && (
           <div className="sandbox-status">
             <p><b>Preview:</b> {sandbox.preview_url || 'not started'}</p>
