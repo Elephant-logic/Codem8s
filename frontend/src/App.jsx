@@ -10,6 +10,7 @@ export default function App() {
   const [sandboxBusy, setSandboxBusy] = useState(false);
   const [sandbox, setSandbox] = useState(null);
   const [sandboxLogLines, setSandboxLogLines] = useState([]);
+  const [sandboxInstruction, setSandboxInstruction] = useState('Use the blueprint, entry point, dependency topology, and command output to fix the current build error.');
   const [settings, setSettings] = useState(null);
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('gpt-4o-mini');
@@ -70,8 +71,10 @@ export default function App() {
         body: JSON.stringify(body),
       });
       setState(data);
+      return data;
     } catch (err) {
       setError(String(err.message || err));
+      return null;
     } finally {
       setBusy(false);
     }
@@ -110,8 +113,13 @@ export default function App() {
     if (state) await post(`/projects/${state.project_id}/validate`);
   }
 
-  function exportZip() {
-    if (state) window.location = API + `/projects/${state.project_id}/export`;
+  async function exportZip() {
+    if (!state) return;
+    if (state.status !== 'valid') {
+      setError('Export blocked: project is not valid yet. Run Sandbox, read the command output, then use AI Fix / Validate until build is green.');
+      return;
+    }
+    window.location = API + `/projects/${state.project_id}/export`;
   }
 
   async function startSandbox() {
@@ -160,6 +168,25 @@ export default function App() {
       await refreshSandboxStatus();
     } catch (err) {
       setError(String(err.message || err));
+    }
+  }
+
+  async function fixFromSandbox() {
+    if (!state) return;
+    setSandboxBusy(true);
+    try {
+      const data = await request(`/projects/${state.project_id}/sandbox/fix`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction: sandboxInstruction }),
+      });
+      setSandbox(data);
+      await refreshSandboxLogs();
+      await validate();
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setSandboxBusy(false);
     }
   }
 
@@ -225,7 +252,7 @@ export default function App() {
         <div className="split-head">
           <div>
             <h2>Live Sandbox</h2>
-            <p>Run the generated project, watch install/build/dev logs, then fix from what actually happened.</p>
+            <p>Runs dependency install, build, dev server, and shows the command line output.</p>
           </div>
           <div className="status-pills">
             <span className={sandbox?.running ? 'pill ok-bg' : 'pill'}>{sandbox?.running ? 'Running' : 'Stopped'}</span>
@@ -238,6 +265,9 @@ export default function App() {
           <button onClick={refreshSandboxAll} disabled={!state || sandboxBusy}>Refresh Logs</button>
           <button onClick={openPreview} disabled={!sandbox?.preview_url}>Open Preview</button>
         </div>
+        <h3>AI Fix From Sandbox</h3>
+        <textarea value={sandboxInstruction} onChange={(event) => setSandboxInstruction(event.target.value)} placeholder="Tell AI what to try using the command output" />
+        <button onClick={fixFromSandbox} disabled={!state || sandboxBusy}>AI Fix + Re-run</button>
         {sandbox && (
           <div className="sandbox-status">
             <p><b>Preview:</b> {sandbox.preview_url || 'not started'}</p>
