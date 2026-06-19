@@ -15,9 +15,13 @@ REQUIRED_EXPORTS = {
     "backend/settings.py": ["load_settings", "save_settings", "settings_status"],
 }
 
+CODE_EXTENSIONS = (".js", ".jsx", ".py", ".css")
+
+
 def safe_path(path: str) -> bool:
     p = PurePosixPath(path)
     return not path.startswith("/") and ".." not in p.parts and len(path.strip()) > 0
+
 
 def detect_placeholders(content: str) -> List[str]:
     found = []
@@ -27,12 +31,28 @@ def detect_placeholders(content: str) -> List[str]:
             found.append(phrase)
     return found
 
+
+def detect_markdown_or_bad_prefix(path: str, content: str) -> List[str]:
+    errors: List[str] = []
+    if not path.endswith(CODE_EXTENSIONS):
+        return errors
+    stripped = content.lstrip("\ufeff\n\r\t ")
+    if stripped.startswith("```"):
+        errors.append("code file starts with markdown fence ```")
+    elif stripped.startswith("`"):
+        errors.append("code file starts with stray backtick")
+    if "```" in stripped:
+        errors.append("code file contains markdown fence ```")
+    return errors
+
+
 def validate_python(content: str) -> List[str]:
     try:
         ast.parse(content)
         return []
     except SyntaxError as exc:
         return [f"SyntaxError line {exc.lineno}: {exc.msg}"]
+
 
 def exported_names(content: str) -> set[str]:
     names = set()
@@ -49,6 +69,7 @@ def exported_names(content: str) -> set[str]:
                     names.add(target.id)
     return names
 
+
 def validate_file(path: str, content: str, spec_files: Dict[str, str]) -> Tuple[bool, List[str]]:
     errors: List[str] = []
     if not safe_path(path):
@@ -57,6 +78,7 @@ def validate_file(path: str, content: str, spec_files: Dict[str, str]) -> Tuple[
         errors.append("file is not in locked manifest")
     if len(content.strip()) < 20:
         errors.append("file is too small to be useful")
+    errors.extend(detect_markdown_or_bad_prefix(path, content))
     if not path.endswith("validator.py"):
         for phrase in detect_placeholders(content):
             errors.append(f"banned placeholder phrase: {phrase}")
@@ -68,6 +90,7 @@ def validate_file(path: str, content: str, spec_files: Dict[str, str]) -> Tuple[
             if name not in names:
                 errors.append(f"missing required export: {name}")
     return len(errors) == 0, errors
+
 
 def validate_project_against_spec(files: Dict[str, str], spec_files: Dict[str, str]) -> Tuple[bool, List[str]]:
     errors: List[str] = []
