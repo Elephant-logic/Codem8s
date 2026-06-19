@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import json
-import os
 import py_compile
 import re
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
 
 from .agent_llm import chat_json
 from .agent_blueprint import blueprint_from_spec
 from .models import ProjectSpec
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text or "")
 
 
 def clean(text: str) -> str:
@@ -31,15 +34,9 @@ def write_project(root: Path, files: dict[str, str]) -> None:
 
 def run_cmd(cmd: list[str], cwd: Path, timeout: int = 90) -> tuple[bool, str]:
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-        )
-        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        return proc.returncode == 0, output[-12000:]
+        proc = subprocess.run(cmd, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
+        output = strip_ansi((proc.stdout or "") + "\n" + (proc.stderr or ""))
+        return proc.returncode == 0, output[-16000:]
     except subprocess.TimeoutExpired as exc:
         return False, f"Command timed out: {' '.join(cmd)}\n{exc}"
     except Exception as exc:
@@ -52,60 +49,111 @@ def check_python(root: Path) -> list[dict[str, str]]:
         try:
             py_compile.compile(str(file), doraise=True)
         except Exception as exc:
-            rel = file.relative_to(root).as_posix()
-            problems.append({"path": rel, "error": str(exc)})
+            problems.append({"path": file.relative_to(root).as_posix(), "error": str(exc)})
     return problems
 
 
-def check_frontend(root: Path) -> list[dict[str, str]]:
+def normalize_src_path(path: str) -> str:
+    path = path.strip().strip('"\'')
+    if path.startswith("/src/"):
+        path = path[1:]
+    if path.startswith("src/"):
+        return "frontend/" + path
+    if path.startswith("frontend/"):
+        return path
+    return path
+
+
+def extract_missing_export_problems(output: str) -> list[dict[str, str]]:
+    text = strip_ansi(output)
     problems: list[dict[str, str]] = []
-    frontend = root / "frontend"
-    if not frontend.exists() or not (frontend / "package.json").exists():
-        return problems
+    seen: set[tuple[str, str]] = set()
 
-    # npm install is needed because the temp folder is clean.
-    ok, out = run_cmd(["npm", "install", "--silent"], frontend, timeout=180)
-    if not ok:
-        problems.append({"path": "frontend/package.json", "error": "npm install failed\n" + out})
-        return problems
-
-    ok, out = run_cmd(["npm", "run", "build"], frontend, timeout=180)
-    if not ok:
-        problems.append({"path": guess_frontend_error_file(out), "error": "npm build failed\n" + out})
-
+    patterns = [
+        r'\[MISSING_EXPORT\]\s+"(?P<name>[^"]+)"\s+is not exported by\s+"(?P<path>[^"]+)"',
+        r'"(?P<name>[^"]+)"\s+is not exported by\s+"(?P<path>[^"]+)"',
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            name = match.group("name")
+            path = normalize_src_path(match.group("path"))
+            key = (path, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            problems.append({
+                "path": path,
+                "error": f"Missing export: {name} is not exported by {path}. Add this export or change importing files to use the file's actual export. Full build output:\n{text[-12000:]}",
+                "missing_export": name,
+            })
     return problems
 
 
 def guess_frontend_error_file(output: str) -> str:
-    patterns = [
-        r"frontend/src/[A-Za-z0-9_./-]+\.(?:jsx|js|css)",
-        r"src/[A-Za-z0-9_./-]+\.(?:jsx|js|css)",
-        r"([A-Za-z0-9_./-]+\.(?:jsx|js|css))",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, output)
+    text = strip_ansi(output)
+    for pattern in [r"frontend/src/[A-Za-z0-9_./-]+\.(?:jsx|js|css)", r"src/[A-Za-z0-9_./-]+\.(?:jsx|js|css)"]:
+        match = re.search(pattern, text)
         if match:
-            path = match.group(0)
-            if path.startswith("src/"):
-                return "frontend/" + path
-            if path.startswith("frontend/"):
-                return path
-    if "App.jsx" in output:
+            return normalize_src_path(match.group(0))
+    if "App.jsx" in text:
         return "frontend/src/App.jsx"
     return "frontend/src/App.jsx"
 
 
-def repair_file_against_error(spec: ProjectSpec, path: str, files: dict[str, str], error: str) -> str | None:
+def check_frontend(root: Path) -> list[dict[str, str]]:
+    frontend = root / "frontend"
+    if not frontend.exists() or not (frontend / "package.json").exists():
+        return []
+
+    ok, out = run_cmd(["npm", "install", "--silent"], frontend, timeout=180)
+    if not ok:
+        return [{"path": "frontend/package.json", "error": "npm install failed\n" + out}]
+
+    ok, out = run_cmd(["npm", "run", "build"], frontend, timeout=180)
+    if ok:
+        return []
+
+    missing = extract_missing_export_problems(out)
+    if missing:
+        return missing
+    return [{"path": guess_frontend_error_file(out), "error": "npm build failed\n" + out}]
+
+
+def expected_file_rule(path: str) -> str:
+    if path.endswith(".jsx"):
+        return "React JSX component file. JSX is allowed. If default is required, include export default. If named exports are required, include them."
+    if path.endswith(".js"):
+        return "Plain JavaScript module file. JSX is forbidden. Export functions/classes/constants/data only. If default is required, include export default. If named exports are required, include them."
+    if path.endswith(".css"):
+        return "CSS only."
+    if path.endswith(".py"):
+        return "Python only."
+    return "Correct syntax for the file extension."
+
+
+def topology_for(path: str, blueprint: dict) -> dict:
+    topo = blueprint.get("dependency_topology") or {}
+    meta = topo.get(path) if isinstance(topo, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
+def repair_file_against_error(spec: ProjectSpec, path: str, files: dict[str, str], error: str, missing_export: str | None = None) -> str | None:
     blueprint = blueprint_from_spec(spec)
     existing_paths = list(files.keys())
     compact_files = {p: c[:7000] for p, c in files.items()}
     current = files.get(path, "")
+    topology = topology_for(path, blueprint)
 
-    system = """
+    system = f"""
 You are Codem8s Build Repair.
-Return JSON only: {"content": "full replacement file contents"}
+Return JSON only: {{"content": "full replacement file contents"}}
 
-Repair the target file against the REAL build error.
+Repair the target file against the REAL Vite/Python build error.
+
+Target file: {path}
+Target file rule: {expected_file_rule(path)}
+Topology contract for target file: {json.dumps(topology, indent=2)}
+Missing export to satisfy: {missing_export or "none"}
 
 Rules:
 - Fix the actual error, not a guess.
@@ -114,26 +162,27 @@ Rules:
 - No TODO/future-work comments.
 - Keep language correct for file extension.
 - Only import files listed in existing_paths.
-- If an imported helper does not exist, remove the import and define the helper locally.
+- If the error says a name/default is not exported by this file, make this file export that exact name/default.
+- Do not remove working functionality just to make the build pass.
 - React/Vite files must compile.
 - Python files must compile.
-- Keep the app feature-complete according to the blueprint.
 """
     payload = {
-        "blueprint": blueprint,
         "target_path": path,
+        "missing_export": missing_export,
         "existing_paths": existing_paths,
-        "build_error": error,
-        "current_file": current[:12000],
+        "build_error": strip_ansi(error),
+        "current_file": current[:14000],
         "all_files": compact_files,
+        "blueprint_summary": {"app_name": blueprint.get("app_name"), "goal": blueprint.get("goal"), "kind": blueprint.get("kind")},
     }
-    data = chat_json(system, json.dumps(payload, indent=2), temperature=0.16)
+    data = chat_json(system, json.dumps(payload, indent=2), temperature=0.10)
     if data and isinstance(data.get("content"), str):
         return clean(data["content"])
     return None
 
 
-def real_build_repair_project(spec: ProjectSpec, files: dict[str, str], max_rounds: int = 3) -> tuple[dict[str, str], list[str]]:
+def real_build_repair_project(spec: ProjectSpec, files: dict[str, str], max_rounds: int = 6) -> tuple[dict[str, str], list[str], bool]:
     changed = dict(files)
     logs: list[str] = []
 
@@ -141,38 +190,40 @@ def real_build_repair_project(spec: ProjectSpec, files: dict[str, str], max_roun
         with tempfile.TemporaryDirectory(prefix="codem8s_build_") as tmp:
             root = Path(tmp)
             write_project(root, changed)
-
             problems = check_python(root)
             problems.extend(check_frontend(root))
 
         if not problems:
             logs.append(f"Real build check passed on round {round_number}")
-            return changed, logs
+            return changed, logs, True
 
         logs.append(f"Real build check found {len(problems)} problem(s) on round {round_number}")
-
         repaired_any = False
-        for problem in problems[:5]:
+
+        for problem in problems[:10]:
             path = problem.get("path") or ""
             error = problem.get("error") or ""
+            missing_export = problem.get("missing_export")
+
             if path not in changed:
-                # Try App.jsx for unknown frontend errors.
                 if path.startswith("frontend/") and "frontend/src/App.jsx" in changed:
                     path = "frontend/src/App.jsx"
                 else:
                     logs.append(f"Could not repair missing target: {problem.get('path')}")
                     continue
 
-            repaired = repair_file_against_error(spec, path, changed, error)
+            repaired = repair_file_against_error(spec, path, changed, error, missing_export=missing_export)
             if repaired:
                 changed[path] = repaired
                 repaired_any = True
-                logs.append(f"Repaired {path} from real build error")
+                extra = f" export {missing_export}" if missing_export else ""
+                logs.append(f"Repaired {path}{extra} from real build error")
             else:
                 logs.append(f"Repair failed for {path}")
 
         if not repaired_any:
-            break
+            logs.append("Real build repair could not repair any files this round")
+            return changed, logs, False
 
     logs.append("Real build repair stopped with remaining build problems")
-    return changed, logs
+    return changed, logs, False
