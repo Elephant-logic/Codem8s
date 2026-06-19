@@ -1,5 +1,6 @@
 from __future__ import annotations
 import ast
+import re
 from pathlib import PurePosixPath
 from typing import Dict, List, Tuple
 
@@ -70,6 +71,80 @@ def exported_names(content: str) -> set[str]:
     return names
 
 
+def js_exports(content: str) -> tuple[set[str], bool]:
+    named: set[str] = set()
+    has_default = bool(re.search(r"\bexport\s+default\b", content))
+    for pattern in [
+        r"\bexport\s+function\s+([A-Za-z_$][\w$]*)",
+        r"\bexport\s+class\s+([A-Za-z_$][\w$]*)",
+        r"\bexport\s+const\s+([A-Za-z_$][\w$]*)",
+        r"\bexport\s+let\s+([A-Za-z_$][\w$]*)",
+        r"\bexport\s+var\s+([A-Za-z_$][\w$]*)",
+    ]:
+        named.update(re.findall(pattern, content))
+    for group in re.findall(r"\bexport\s*\{([^}]+)\}", content, re.S):
+        for part in group.split(","):
+            token = part.strip()
+            if not token:
+                continue
+            if " as " in token:
+                token = token.split(" as ")[-1].strip()
+            token = re.sub(r"[^A-Za-z0-9_$].*$", "", token)
+            if token:
+                named.add(token)
+    return named, has_default
+
+
+def resolve_import_path(from_path: str, import_path: str, files: Dict[str, str]) -> str | None:
+    if not import_path.startswith("."):
+        return None
+    base = PurePosixPath(from_path).parent
+    raw = str((base / import_path).as_posix())
+    candidates = [raw, raw + ".js", raw + ".jsx", raw + "/index.js", raw + "/index.jsx"]
+    for candidate in candidates:
+        clean = str(PurePosixPath(candidate))
+        if clean in files:
+            return clean
+    return None
+
+
+def validate_js_import_exports(files: Dict[str, str]) -> List[str]:
+    errors: List[str] = []
+    export_cache: dict[str, tuple[set[str], bool]] = {}
+    for path, content in files.items():
+        if path.endswith((".js", ".jsx")):
+            export_cache[path] = js_exports(content)
+
+    for path, content in files.items():
+        if not path.endswith((".js", ".jsx")):
+            continue
+
+        for names_text, import_path in re.findall(r"import\s*\{([^}]+)\}\s*from\s*['\"]([^'\"]+)['\"]", content):
+            target = resolve_import_path(path, import_path, files)
+            if not target or target not in export_cache:
+                continue
+            exported, _ = export_cache[target]
+            for raw_name in names_text.split(","):
+                name = raw_name.strip()
+                if not name:
+                    continue
+                if " as " in name:
+                    name = name.split(" as ")[0].strip()
+                if name not in exported:
+                    errors.append(f"{path}: imports named export {name} from {target}, but {target} exports {sorted(exported) or 'no named exports'}")
+
+        for default_name, import_path in re.findall(r"import\s+([A-Za-z_$][\w$]*)\s+from\s*['\"]([^'\"]+)['\"]", content):
+            if import_path in {"react", "react-dom/client"} or import_path.endswith(".css"):
+                continue
+            target = resolve_import_path(path, import_path, files)
+            if not target or target not in export_cache:
+                continue
+            _, has_default = export_cache[target]
+            if not has_default:
+                errors.append(f"{path}: imports default {default_name} from {target}, but {target} has no default export")
+    return errors
+
+
 def validate_file(path: str, content: str, spec_files: Dict[str, str]) -> Tuple[bool, List[str]]:
     errors: List[str] = []
     if not safe_path(path):
@@ -101,4 +176,5 @@ def validate_project_against_spec(files: Dict[str, str], spec_files: Dict[str, s
         ok, file_errors = validate_file(path, content, spec_files)
         if not ok:
             errors.extend([f"{path}: {err}" for err in file_errors])
+    errors.extend(validate_js_import_exports(files))
     return len(errors) == 0, errors
