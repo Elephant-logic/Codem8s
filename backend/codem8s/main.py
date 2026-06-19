@@ -15,7 +15,7 @@ from .sandbox import start_sandbox, stop_sandbox, sandbox_status, sandbox_logs
 from .project_store import load_all_projects, load_project, save_project
 
 app = FastAPI(title="Codem8s Full Stack")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"] , allow_headers=["*"])
 PROJECTS: dict[str, BuildState] = load_all_projects()
 MAX_BUILD_ALL_STEPS = 50
 
@@ -242,11 +242,16 @@ def sandbox_fix(project_id: str, req: SandboxFixRequest):
 def export(project_id: str):
     state = get_project(project_id)
     if state.status != "valid":
-        raise HTTPException(400, "Project is not valid. Run Build All/Validate until the real build passes.")
+        state.logs.append("Snapshot exported while build was not valid")
     path = export_project(state)
     safe_name = state.spec.app_name.replace(" ", "_")
     save_project(state)
-    return FileResponse(path, filename=f"{safe_name}.zip")
+    return FileResponse(path, filename=f"{safe_name}_snapshot.zip")
+
+
+@app.get("/projects/{project_id}/export-snapshot")
+def export_snapshot(project_id: str):
+    return export(project_id)
 
 
 @app.get("/settings", response_model=SettingsOut)
