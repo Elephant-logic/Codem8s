@@ -137,10 +137,9 @@ export default function App() {
   async function exportZip() {
     if (!state) return;
     if (state.status !== 'valid') {
-      setError('Export blocked: project is not valid yet. Run Sandbox, read the command output, then use AI Fix / Validate until build is green.');
-      return;
+      setError('Exporting current snapshot. Build is not green yet, but files will still download.');
     }
-    window.location = API + `/projects/${state.project_id}/export`;
+    window.location = API + `/projects/${state.project_id}/export-snapshot`;
   }
 
   async function startSandbox() {
@@ -298,7 +297,7 @@ export default function App() {
             <button onClick={pauseBuild} disabled={!state || busy}>Pause</button>
             <button onClick={resumeBuild} disabled={!state || busy}>Resume</button>
             <button onClick={validate} disabled={!state || busy}>Validate</button>
-            <button onClick={exportZip} disabled={!state}>Export Zip</button>
+            <button onClick={exportZip} disabled={!state}>Export Snapshot</button>
           </div>
           {state && <p><b>Status:</b> {state.status} | <b>Progress:</b> {progress.label} | <b>Rejected:</b> {progress.rejected}</p>}
 
