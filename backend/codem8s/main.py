@@ -14,6 +14,7 @@ from .agent_project_repair import repair_project
 from .agent_build_repair import real_build_repair_project
 from .sandbox import start_sandbox, stop_sandbox, sandbox_status, sandbox_logs
 from .project_store import load_all_projects, load_project, save_project
+from .snapshot_store import create_snapshot, list_snapshots, restore_snapshot
 
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"] , allow_headers=["*"])
@@ -25,10 +26,21 @@ class SandboxFixRequest(BaseModel):
     instruction: str = "Fix the current sandbox/build error using the blueprint and dependency topology."
 
 
+class SnapshotRequest(BaseModel):
+    label: str = "manual"
+
+
 def remember(state: BuildState) -> BuildState:
     PROJECTS[state.project_id] = state
     save_project(state)
     return state
+
+
+def snap(state: BuildState, label: str) -> None:
+    try:
+        create_snapshot(state, label)
+    except Exception as exc:
+        state.logs.append(f"Snapshot skipped: {exc}")
 
 
 def get_project(project_id: str) -> BuildState:
@@ -147,6 +159,8 @@ def create_project(req: BuildRequest) -> BuildState:
     spec = build_spec(req.idea, req.stack)
     files = {path: FileSpec(path=path, purpose=purpose) for path, purpose in spec.files.items()}
     state = BuildState(project_id=str(uuid4()), use_ai=req.use_ai, spec=spec, files=files, logs=["Spec locked", f"AI generation: {'on' if req.use_ai else 'off'}"])
+    remember(state)
+    snap(state, "001 created spec")
     return remember(state)
 
 
@@ -159,6 +173,7 @@ def change_project(project_id: str, req: ChangeRequest) -> BuildState:
             state.files[path] = FileSpec(path=path, purpose=purpose)
     state.status = "planned"
     state.logs.append(f"Instruction applied: {req.instruction}")
+    snap(state, "instruction applied")
     return remember(state)
 
 
@@ -175,6 +190,7 @@ def build_all(project_id: str) -> BuildState:
     if state.status == "paused":
         state.logs.append("Resume before building all")
         return remember(state)
+    snap(state, "before build all")
     state.status = "building"
     for _ in range(MAX_BUILD_ALL_STEPS):
         progressed = build_one_file(state)
@@ -183,9 +199,11 @@ def build_all(project_id: str) -> BuildState:
         if not progressed:
             break
     if state.status == "complete":
+        snap(state, "files generated")
         repair_whole_project(state)
         if real_build_check_and_repair(state):
             state.status = "valid"
+    snap(state, "after build all")
     return remember(state)
 
 
@@ -209,12 +227,14 @@ def resume_project(project_id: str) -> BuildState:
 @app.post("/projects/{project_id}/validate")
 def validate_project(project_id: str) -> BuildState:
     state = get_project(project_id)
+    snap(state, "before validate")
     repair_whole_project(state)
     build_ok = real_build_check_and_repair(state)
     contents = current_contents(state)
     ok, errors = validate_project_against_spec(contents, state.spec.files)
     state.status = "valid" if ok and build_ok else "invalid"
     state.logs.extend(errors or (["Project valid"] if build_ok else ["Project invalid: real build failed"]))
+    snap(state, "after validate")
     return remember(state)
 
 
@@ -223,9 +243,36 @@ def get_graph(project_id: str):
     return project_graph(get_project(project_id))
 
 
+@app.post("/projects/{project_id}/snapshot")
+def manual_snapshot(project_id: str, req: SnapshotRequest):
+    state = get_project(project_id)
+    item = create_snapshot(state, req.label)
+    state.logs.append(f"Snapshot saved: {item['snapshot_id']} {req.label}")
+    remember(state)
+    return item
+
+
+@app.get("/projects/{project_id}/snapshots")
+def get_snapshots(project_id: str):
+    get_project(project_id)
+    return {"project_id": project_id, "snapshots": list_snapshots(project_id)}
+
+
+@app.post("/projects/{project_id}/restore/{snapshot_id}")
+def restore_project_snapshot(project_id: str, snapshot_id: str) -> BuildState:
+    restored = restore_snapshot(project_id, snapshot_id)
+    if not restored:
+        raise HTTPException(404, "Snapshot not found")
+    PROJECTS[project_id] = restored
+    save_project(restored)
+    snap(restored, f"restored {snapshot_id}")
+    return remember(restored)
+
+
 @app.post("/projects/{project_id}/sandbox/start")
 def sandbox_start(project_id: str):
     state = get_project(project_id)
+    snap(state, "before sandbox start")
     save_project(state)
     return start_sandbox(state)
 
@@ -248,6 +295,7 @@ def sandbox_get_logs(project_id: str, limit: int = 200):
 @app.post("/projects/{project_id}/sandbox/fix")
 def sandbox_fix(project_id: str, req: SandboxFixRequest):
     state = get_project(project_id)
+    snap(state, "before sandbox fix")
     info = sandbox_status(project_id)
     recent = sandbox_logs(project_id, limit=120).get("logs", [])
     state.logs.append("Sandbox AI fix requested")
@@ -259,6 +307,7 @@ def sandbox_fix(project_id: str, req: SandboxFixRequest):
     repair_whole_project(state)
     if real_build_check_and_repair(state):
         state.status = "valid"
+    snap(state, "after sandbox fix")
     remember(state)
     return start_sandbox(state)
 
@@ -268,6 +317,7 @@ def export(project_id: str):
     state = get_project(project_id)
     if state.status != "valid":
         state.logs.append("Snapshot exported while build was not valid")
+    snap(state, "exported snapshot")
     path = export_project(state)
     safe_name = state.spec.app_name.replace(" ", "_")
     save_project(state)
