@@ -14,6 +14,7 @@ export default function App() {
   const [graph, setGraph] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
   const [snapshots, setSnapshots] = useState([]);
+  const [timeline, setTimeline] = useState([]);
   const [snapshotLabel, setSnapshotLabel] = useState('manual checkpoint');
   const [settings, setSettings] = useState(null);
   const [apiKey, setApiKey] = useState('');
@@ -22,7 +23,7 @@ export default function App() {
   const [error, setError] = useState('');
 
   useEffect(() => { loadSettings(); }, []);
-  useEffect(() => { if (state?.project_id) { refreshGraph(); refreshSnapshots(); } }, [state?.project_id, state?.status]);
+  useEffect(() => { if (state?.project_id) refreshProjectMeta(); }, [state?.project_id, state?.status]);
 
   const progress = useMemo(() => {
     const files = state ? Object.values(state.files) : [];
@@ -73,13 +74,17 @@ export default function App() {
     finally { setBusy(false); }
   }
 
-  async function createProject() {
-    setSandbox(null); setSandboxLogLines([]); setGraph(null); setSelectedNode(null); setSnapshots([]);
-    const created = await post('/projects', { idea, use_ai: useAi });
-    if (created) setTimeout(refreshSnapshots, 300);
+  async function refreshProjectMeta() {
+    await Promise.all([refreshGraph(), refreshSnapshots(), refreshTimeline()]);
   }
 
-  async function buildNext() { if (state) await post(`/projects/${state.project_id}/build-next`); }
+  async function createProject() {
+    setSandbox(null); setSandboxLogLines([]); setGraph(null); setSelectedNode(null); setSnapshots([]); setTimeline([]);
+    const created = await post('/projects', { idea, use_ai: useAi });
+    if (created) setTimeout(refreshProjectMeta, 300);
+  }
+
+  async function buildNext() { if (state) { await post(`/projects/${state.project_id}/build-next`); await refreshProjectMeta(); } }
 
   async function buildAll() {
     if (!state) return;
@@ -94,21 +99,21 @@ export default function App() {
         await new Promise((resolve) => setTimeout(resolve, 150));
       }
       const validated = await request(`/projects/${current.project_id}/validate`, { method: 'POST' });
-      setState(validated); await refreshSnapshots();
+      setState(validated); await refreshProjectMeta();
     } catch (err) { setError(`Build stopped: ${String(err.message || err)}. Press Build All again to continue from saved progress.`); }
     finally { setBusy(false); }
   }
 
   async function pauseBuild() { if (state) await post(`/projects/${state.project_id}/pause`); }
   async function resumeBuild() { if (state) await post(`/projects/${state.project_id}/resume`); }
-  async function applyChange() { if (state && change.trim()) { await post(`/projects/${state.project_id}/change`, { instruction: change }); setChange(''); await refreshSnapshots(); } }
-  async function validate() { if (state) { await post(`/projects/${state.project_id}/validate`); await refreshSnapshots(); } }
+  async function applyChange() { if (state && change.trim()) { await post(`/projects/${state.project_id}/change`, { instruction: change }); setChange(''); await refreshProjectMeta(); } }
+  async function validate() { if (state) { await post(`/projects/${state.project_id}/validate`); await refreshProjectMeta(); } }
 
   async function exportZip() {
     if (!state) return;
     if (state.status !== 'valid') setError('Exporting current snapshot. Build is not green yet, but files will still download.');
     window.location = API + `/projects/${state.project_id}/export-snapshot`;
-    setTimeout(refreshSnapshots, 500);
+    setTimeout(refreshProjectMeta, 500);
   }
 
   async function refreshGraph() {
@@ -122,10 +127,14 @@ export default function App() {
 
   async function refreshSnapshots() {
     if (!state?.project_id) return;
-    try {
-      const data = await request(`/projects/${state.project_id}/snapshots`);
-      setSnapshots(data.snapshots || []);
-    } catch (err) { setError(String(err.message || err)); }
+    try { const data = await request(`/projects/${state.project_id}/snapshots`); setSnapshots(data.snapshots || []); }
+    catch (err) { setError(String(err.message || err)); }
+  }
+
+  async function refreshTimeline() {
+    if (!state?.project_id) return;
+    try { const data = await request(`/projects/${state.project_id}/timeline`); setTimeline(data.events || []); }
+    catch (err) { setError(String(err.message || err)); }
   }
 
   async function saveSnapshot() {
@@ -133,7 +142,7 @@ export default function App() {
     setBusy(true);
     try {
       await request(`/projects/${state.project_id}/snapshot`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label: snapshotLabel || 'manual checkpoint' }) });
-      await refreshSnapshots();
+      await refreshProjectMeta();
     } catch (err) { setError(String(err.message || err)); }
     finally { setBusy(false); }
   }
@@ -143,7 +152,7 @@ export default function App() {
     setBusy(true);
     try {
       const restored = await request(`/projects/${state.project_id}/restore/${snapshotId}`, { method: 'POST' });
-      setState(restored); setSandbox(null); setSandboxLogLines([]); await refreshGraph(); await refreshSnapshots();
+      setState(restored); setSandbox(null); setSandboxLogLines([]); await refreshProjectMeta();
     } catch (err) { setError(String(err.message || err)); }
     finally { setBusy(false); }
   }
@@ -151,7 +160,7 @@ export default function App() {
   async function startSandbox() {
     if (!state) return;
     setSandboxBusy(true);
-    try { const data = await request(`/projects/${state.project_id}/sandbox/start`, { method: 'POST' }); setSandbox(data); await refreshSandboxLogs(); await refreshSnapshots(); }
+    try { const data = await request(`/projects/${state.project_id}/sandbox/start`, { method: 'POST' }); setSandbox(data); await refreshSandboxLogs(); await refreshProjectMeta(); }
     catch (err) { setError(String(err.message || err)); }
     finally { setSandboxBusy(false); }
   }
@@ -159,7 +168,7 @@ export default function App() {
   async function stopSandboxRun() {
     if (!state) return;
     setSandboxBusy(true);
-    try { const data = await request(`/projects/${state.project_id}/sandbox/stop`, { method: 'POST' }); setSandbox(data); await refreshSandboxLogs(); }
+    try { const data = await request(`/projects/${state.project_id}/sandbox/stop`, { method: 'POST' }); setSandbox(data); await refreshSandboxLogs(); await refreshTimeline(); }
     catch (err) { setError(String(err.message || err)); }
     finally { setSandboxBusy(false); }
   }
@@ -185,7 +194,7 @@ export default function App() {
     setSandboxBusy(true);
     try {
       const data = await request(`/projects/${state.project_id}/sandbox/fix`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction: sandboxInstruction }) });
-      setSandbox(data); await refreshSandboxLogs(); await validate(); await refreshGraph(); await refreshSnapshots();
+      setSandbox(data); await refreshSandboxLogs(); await validate(); await refreshProjectMeta();
       return data;
     } catch (err) { setError(String(err.message || err)); return null; }
     finally { setSandboxBusy(false); }
@@ -206,16 +215,16 @@ export default function App() {
         if (signature && signature === previousSignature) { setError('Work-through paused: the same error repeated. Add a steering instruction, then press Work Through again.'); break; }
         previousSignature = signature;
         current = await request(`/projects/${state.project_id}/sandbox/fix`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction: sandboxInstruction }) });
-        setSandbox(current); await refreshSandboxLogs(); await refreshGraph(); await refreshSnapshots();
+        setSandbox(current); await refreshSandboxLogs(); await refreshProjectMeta();
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     } catch (err) { setError(`Work-through stopped: ${String(err.message || err)}`); }
     finally { setSandboxBusy(false); }
   }
 
-  async function refreshSandboxAll() { await refreshSandboxLogs(); }
+  async function refreshSandboxAll() { await refreshSandboxLogs(); await refreshTimeline(); }
   function openPreview() { if (sandbox?.preview_url) window.open(sandbox.preview_url, '_blank', 'noopener,noreferrer'); }
-  function fmtTime(seconds) { return seconds ? new Date(seconds * 1000).toLocaleString() : ''; }
+  function fmtTime(seconds) { return seconds && seconds > 100000 ? new Date(seconds * 1000).toLocaleString() : ''; }
 
   return (
     <main className="app">
@@ -243,18 +252,18 @@ export default function App() {
         <section className="card"><h2>Spec</h2><pre className="log">{state ? JSON.stringify(state.spec, null, 2) : 'No project yet'}</pre></section>
       </div>
 
+      <section className="card timeline-card">
+        <div className="split-head"><div><h2>Live Timeline</h2><p>Clear steps from planning, snapshots, build, repair, and sandbox activity.</p></div><button onClick={refreshTimeline} disabled={!state}>Refresh Timeline</button></div>
+        <div className="timeline-list">
+          {timeline.slice().reverse().map((event, index) => <div className={`timeline-item ${event.kind}`} key={`${event.kind}-${index}-${event.detail}`}><b>{event.title}</b><span>{event.detail}</span>{fmtTime(event.created_at) && <small>{fmtTime(event.created_at)}</small>}</div>)}
+          {!timeline.length && <p>No timeline events yet.</p>}
+        </div>
+      </section>
+
       <section className="card snapshot-card">
         <div className="split-head"><div><h2>Snapshot History</h2><p>Save checkpoints and restore older versions when a repair goes wrong.</p></div><button onClick={refreshSnapshots} disabled={!state}>Refresh Snapshots</button></div>
         <div className="row"><input value={snapshotLabel} onChange={(event) => setSnapshotLabel(event.target.value)} placeholder="snapshot label" /><button onClick={saveSnapshot} disabled={!state || busy}>Save Snapshot</button></div>
-        <div className="snapshot-list">
-          {snapshots.slice().reverse().map((item) => (
-            <div className="snapshot-item" key={item.snapshot_id}>
-              <div><b>{item.snapshot_id}</b> <span>{item.label}</span><small>{fmtTime(item.created_at)}</small></div>
-              <div><span className={item.status === 'valid' ? 'ok' : 'bad'}>{item.status}</span> <span>{item.valid_count}/{item.file_count} valid</span><button onClick={() => restoreSnapshot(item.snapshot_id)} disabled={busy}>Restore</button></div>
-            </div>
-          ))}
-          {!snapshots.length && <p>No snapshots yet.</p>}
-        </div>
+        <div className="snapshot-list">{snapshots.slice().reverse().map((item) => <div className="snapshot-item" key={item.snapshot_id}><div><b>{item.snapshot_id}</b> <span>{item.label}</span><small>{fmtTime(item.created_at)}</small></div><div><span className={item.status === 'valid' ? 'ok' : 'bad'}>{item.status}</span> <span>{item.valid_count}/{item.file_count} valid</span><button onClick={() => restoreSnapshot(item.snapshot_id)} disabled={busy}>Restore</button></div></div>)}{!snapshots.length && <p>No snapshots yet.</p>}</div>
       </section>
 
       <section className="card graph-card">
