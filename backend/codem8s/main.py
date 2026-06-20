@@ -15,6 +15,7 @@ from .agent_build_repair import real_build_repair_project
 from .sandbox import start_sandbox, stop_sandbox, sandbox_status, sandbox_logs
 from .project_store import load_all_projects, load_project, save_project
 from .snapshot_store import create_snapshot, list_snapshots, restore_snapshot
+from .agent_registry import AgentCreateRequest, AgentRunRequest, create_agent, find_agent, get_or_create_specialist, list_agents, remember_agent_result
 
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -30,6 +31,12 @@ class SnapshotRequest(BaseModel):
 class AutonomousRequest(BaseModel):
     instruction: str = "Work through the project until it runs. Use snapshots, sandbox logs, dependency topology, and repair connected files."
     max_rounds: int = 10
+
+
+def dump_model(model):
+    if hasattr(model, "model_dump"):
+        return model.model_dump(mode="json")
+    return json.loads(model.json())
 
 
 def remember(state: BuildState) -> BuildState:
@@ -141,6 +148,33 @@ def mark_validity(state: BuildState, build_ok: bool) -> bool:
     return state.status == "valid"
 
 
+def run_agent_on_state(state: BuildState, req: AgentRunRequest) -> dict:
+    agent = find_agent(skill=req.skill, agent_id=req.agent_id) or get_or_create_specialist(req.goal)
+    goal = req.goal or "Work on the current project using your specialist role."
+    state.logs.append(f"Agent started: {agent.name}")
+    state.logs.append(f"Agent role: {agent.role}")
+    state.logs.append(f"Agent goal: {goal}")
+    snap(state, f"agent {agent.name} start")
+    role_text = " ".join([agent.name, agent.role, *agent.skills, goal]).lower()
+    success = None
+    if any(term in role_text for term in ["repair", "validator", "tester", "build", "dependency", "vite", "import", "export"]):
+        repair_whole_project(state)
+        build_ok = real_build_check_and_repair(state, rounds=4)
+        success = mark_validity(state, build_ok)
+    elif any(term in role_text for term in ["architect", "plan", "topology"]):
+        state.logs.append("Architect Agent reviewed blueprint, topology, files, and acceptance criteria")
+    elif any(term in role_text for term in ["design", "ui", "ux", "dashboard", "css"]):
+        state.logs.append("Designer Agent marked UI/design pass for next generation or repair round")
+        repair_whole_project(state)
+    else:
+        state.logs.append("Specialist Agent recorded project context for future tasks")
+    memory = " | ".join(state.logs[-12:])
+    agent = remember_agent_result(agent, state.project_id, memory=memory, success=success)
+    snap(state, f"agent {agent.name} finish")
+    remember(state)
+    return {"agent": dump_model(agent), "project": state, "timeline": timeline_for(state)}
+
+
 def project_graph(state: BuildState) -> dict:
     topology = {}
     for entry in reversed(state.spec.change_log):
@@ -168,6 +202,7 @@ def timeline_for(state: BuildState) -> dict:
         if "spec locked" in lower: kind, title = "plan", "Blueprint/spec locked"
         elif line.startswith("Accepted "): kind, title = "file", "File accepted"
         elif line.startswith("Rejected "): kind, title = "error", "File rejected"
+        elif "agent" in lower: kind, title = "agent", "Agent activity"
         elif "autonomous" in lower: kind, title = "auto", "Autonomous mode"
         elif "sandbox" in lower and "fix" in lower: kind, title = "repair", "Sandbox repair"
         elif "real build repair" in lower or "dependency-aware" in lower: kind, title = "repair", "Real build repair"
@@ -281,13 +316,33 @@ def autonomous_stream_events(state: BuildState, instruction: str, max_rounds: in
     remember(state)
     yield sse({"kind": "pause", "title": "Paused", "detail": "Round limit reached. Add steering instruction and run again.", "status": state.status, "done": True})
 
+@app.get("/agents")
+def agents_list():
+    return {"agents": [dump_model(agent) for agent in list_agents()]}
+
+@app.post("/agents")
+def agents_create(req: AgentCreateRequest):
+    return create_agent(req)
+
+@app.post("/agents/factory")
+def agents_factory(req: AgentRunRequest):
+    agent = get_or_create_specialist(req.goal)
+    return agent
+
 @app.post("/projects")
 def create_project(req: BuildRequest) -> BuildState:
     spec = build_spec(req.idea, req.stack)
     files = {path: FileSpec(path=path, purpose=purpose) for path, purpose in spec.files.items()}
     state = BuildState(project_id=str(uuid4()), use_ai=req.use_ai, spec=spec, files=files, logs=["Spec locked", f"AI generation: {'on' if req.use_ai else 'off'}"])
     remember(state); snap(state, "001 created spec")
+    specialist = get_or_create_specialist(req.idea)
+    remember_agent_result(specialist, state.project_id, f"Created project from idea: {req.idea}")
+    state.logs.append(f"Agent assigned: {specialist.name}")
     return remember(state)
+
+@app.post("/projects/{project_id}/agents/run")
+def project_agent_run(project_id: str, req: AgentRunRequest):
+    return run_agent_on_state(get_project(project_id), req)
 
 @app.post("/projects/{project_id}/change")
 def change_project(project_id: str, req: ChangeRequest) -> BuildState:
@@ -297,6 +352,9 @@ def change_project(project_id: str, req: ChangeRequest) -> BuildState:
         if path not in state.files:
             state.files[path] = FileSpec(path=path, purpose=purpose)
     state.status = "planned"; state.logs.append(f"Instruction applied: {req.instruction}")
+    specialist = get_or_create_specialist(req.instruction)
+    remember_agent_result(specialist, state.project_id, f"Instruction applied: {req.instruction}")
+    state.logs.append(f"Agent assigned: {specialist.name}")
     snap(state, "instruction applied")
     return remember(state)
 
@@ -388,6 +446,9 @@ def sandbox_fix(project_id: str, req: SandboxFixRequest):
     state.logs.append("Sandbox AI fix requested"); state.logs.append("User instruction: " + req.instruction)
     if info.get("last_error"): state.logs.append("Sandbox last error: " + str(info.get("last_error"))[-2000:])
     if recent: state.logs.append("Sandbox recent logs:\n" + "\n".join(recent[-40:]))
+    agent = get_or_create_specialist(req.instruction + " dependency build repair")
+    remember_agent_result(agent, state.project_id, f"Sandbox fix requested: {req.instruction}")
+    state.logs.append(f"Agent assigned: {agent.name}")
     repair_whole_project(state)
     if real_build_check_and_repair(state): state.status = "valid"
     snap(state, "after sandbox fix"); remember(state)
