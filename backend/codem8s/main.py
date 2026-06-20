@@ -1,36 +1,45 @@
 from __future__ import annotations
+
 import json
 import time
+from uuid import uuid4
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-from uuid import uuid4
-from .models import BuildRequest, ChangeRequest, BuildState, FileSpec
-from .generator import build_spec, apply_instruction, generate_file
-from .validator import validate_file, validate_project_against_spec
-from .exporter import export_project
-from .settings import SettingsIn, SettingsOut, save_settings, settings_status
-from .agent_project_repair import repair_project
+
 from .agent_build_repair import real_build_repair_project
-from .sandbox import start_sandbox, stop_sandbox, sandbox_status, sandbox_logs
-from .project_store import load_all_projects, load_project, save_project
-from .snapshot_store import create_snapshot, list_snapshots, restore_snapshot
-from .agent_registry import AgentCreateRequest, AgentRunRequest, create_agent, find_agent, get_or_create_specialist, list_agents, remember_agent_result
 from .agent_memory import MemoryCreateRequest, create_memory, list_memory, search_memory
+from .agent_project_repair import repair_project
+from .agent_registry import AgentCreateRequest, AgentRunRequest, create_agent, find_agent, get_or_create_specialist, list_agents, remember_agent_result
 from .agent_team import TeamRunRequest, create_team_run, finish_step, get_team_run, list_team_runs, save_team_run
 from .consistency_repair import deterministic_consistency_repair
+from .exporter import export_project
+from .generator import apply_instruction, build_spec, generate_file
+from .models import BuildRequest, BuildState, ChangeRequest, FileSpec
+from .product_quality import quality_as_dict, quality_repair_prompt, score_product_quality
+from .project_store import load_all_projects, load_project, save_project
+from .sandbox import sandbox_logs, sandbox_status, start_sandbox, stop_sandbox
+from .settings import SettingsIn, SettingsOut, save_settings, settings_status
+from .snapshot_store import create_snapshot, list_snapshots, restore_snapshot
+from .validator import validate_file, validate_project_against_spec
 
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
 PROJECTS: dict[str, BuildState] = load_all_projects()
 MAX_BUILD_ALL_STEPS = 50
+QUALITY_PASS_SCORE = 72
+
 
 class SandboxFixRequest(BaseModel):
     instruction: str = "Fix the current sandbox/build error using the blueprint and dependency topology."
 
+
 class SnapshotRequest(BaseModel):
     label: str = "manual"
+
 
 class AutonomousRequest(BaseModel):
     instruction: str = "Work through the project until it runs. Use snapshots, sandbox logs, dependency topology, and repair connected files."
@@ -64,11 +73,15 @@ def get_project(project_id: str) -> BuildState:
     return state
 
 
+def current_contents(state: BuildState) -> dict[str, str]:
+    return {path: item.content for path, item in state.files.items() if item.content}
+
+
 def learn_from_errors(state: BuildState, errors: list[str], category: str = "build_failure") -> None:
     for error in errors[:8]:
         text = str(error)[-2000:]
-        tags = ["auto-learned"]
         low = text.lower()
+        tags = ["auto-learned"]
         if "export" in low or "import" in low:
             tags += ["imports", "exports", "react"]
         if "vite" in low:
@@ -78,7 +91,16 @@ def learn_from_errors(state: BuildState, errors: list[str], category: str = "bui
         if "dashboard" in low or "shallow" in low:
             tags += ["dashboard", "quality"]
         try:
-            create_memory(MemoryCreateRequest(project_id=state.project_id, category=category, pattern=text.split("\n", 1)[0][:180], symptom=text, fix="Search agent memory, repair the connected dependency chain, then rerun validation/build.", lesson=f"Observed in {state.spec.app_name}: {text}", tags=sorted(set(tags)), success=False))
+            create_memory(MemoryCreateRequest(
+                project_id=state.project_id,
+                category=category,
+                pattern=text.split("\n", 1)[0][:180],
+                symptom=text,
+                fix="Search memory, repair the connected dependency/product chain, then rerun validation/build.",
+                lesson=f"Observed in {state.spec.app_name}: {text}",
+                tags=sorted(set(tags)),
+                success=False,
+            ))
         except Exception as exc:
             state.logs.append(f"Agent memory skipped: {exc}")
 
@@ -90,51 +112,22 @@ def memory_context(query: str) -> str:
     return "\n".join(f"- {m.pattern}: {m.fix or m.lesson}" for m in matches)
 
 
-def build_one_file(state: BuildState) -> bool:
-    if state.status == "paused":
-        state.logs.append("Build paused")
-        return False
-    pending = [f for f in state.files.values() if f.status != "valid"]
-    if not pending:
-        state.status = "complete"
-        state.logs.append("All files valid")
-        return False
-    item = pending[0]
-    hints = memory_context(" ".join(item.errors or []) + " " + item.path)
-    previous = list(item.errors or [])
-    if hints and hints != "No matching memory yet.":
-        previous.append("Relevant agent memory:\n" + hints)
-    content = generate_file(item.path, state.spec, use_ai=state.use_ai, previous_errors=previous)
-    ok, errors = validate_file(item.path, content, state.spec.files)
-    item.content = content if ok else ""
-    item.errors = errors
-    item.status = "valid" if ok else "rejected"
-    state.current_file = item.path
-    state.logs.append(("Accepted " if ok else "Rejected ") + item.path)
-    if errors:
-        learn_from_errors(state, [f"{item.path}: {err}" for err in errors], category="file_validation")
-    return True
-
-
 def apply_repaired_contents(state: BuildState, repaired: dict[str, str]) -> int:
     changed = 0
     for path, content in repaired.items():
         if path not in state.files:
             state.files[path] = FileSpec(path=path, purpose=state.spec.files.get(path, "repaired project file"))
         item = state.files[path]
-        if item.content != content:
-            ok, errors = validate_file(path, content, state.spec.files)
-            if ok:
-                item.content, item.status, item.errors = content, "valid", []
-                changed += 1
-            else:
-                item.status, item.errors = "rejected", errors
-                learn_from_errors(state, [f"{path}: {err}" for err in errors], category="repair_rejected")
+        if item.content == content:
+            continue
+        ok, errors = validate_file(path, content, state.spec.files)
+        if ok:
+            item.content, item.status, item.errors = content, "valid", []
+            changed += 1
+        else:
+            item.status, item.errors = "rejected", errors
+            learn_from_errors(state, [f"{path}: {err}" for err in errors], category="repair_rejected")
     return changed
-
-
-def current_contents(state: BuildState) -> dict[str, str]:
-    return {path: item.content for path, item in state.files.items() if item.content}
 
 
 def deterministic_project_repair(state: BuildState) -> int:
@@ -149,15 +142,77 @@ def deterministic_project_repair(state: BuildState) -> int:
     return changed
 
 
+def product_quality_check(state: BuildState) -> bool:
+    score = score_product_quality(current_contents(state))
+    state.logs.append(
+        f"Product quality score {score.total}/100 "
+        f"(architecture {score.product_architecture}, ui {score.ui_depth}, workflow {score.workflow_depth}, data {score.data_richness}, design {score.design_system})"
+    )
+    if score.issues:
+        state.logs.extend([f"Product quality issue: {issue}" for issue in score.issues[:10]])
+        try:
+            create_memory(MemoryCreateRequest(
+                project_id=state.project_id,
+                category="product_quality",
+                pattern="product quality failed",
+                symptom="; ".join(score.issues),
+                fix=quality_repair_prompt(score),
+                lesson=f"Quality score {score.total}/100 for {state.spec.app_name}",
+                tags=["quality", "ui", "product"],
+                success=False,
+            ))
+        except Exception:
+            pass
+    return score.total >= QUALITY_PASS_SCORE and not score.issues
+
+
+def build_one_file(state: BuildState) -> bool:
+    if state.status == "paused":
+        state.logs.append("Build paused")
+        return False
+    pending = [f for f in state.files.values() if f.status != "valid"]
+    if not pending:
+        state.status = "complete"
+        state.logs.append("All files valid")
+        return False
+    item = pending[0]
+    previous = list(item.errors or [])
+    hints = memory_context(" ".join(previous) + " " + item.path)
+    if hints != "No matching memory yet.":
+        previous.append("Relevant agent memory:\n" + hints)
+    content = generate_file(item.path, state.spec, use_ai=state.use_ai, previous_errors=previous)
+    ok, errors = validate_file(item.path, content, state.spec.files)
+    item.content = content if ok else ""
+    item.errors = errors
+    item.status = "valid" if ok else "rejected"
+    state.current_file = item.path
+    state.logs.append(("Accepted " if ok else "Rejected ") + item.path)
+    if errors:
+        learn_from_errors(state, [f"{item.path}: {err}" for err in errors], category="file_validation")
+    return True
+
+
+def fill_missing_files(state: BuildState, limit: int = 80) -> None:
+    state.status = "building"
+    for _ in range(limit):
+        if not [f for f in state.files.values() if f.status != "valid"]:
+            state.status = "complete"
+            state.logs.append("All planned files generated")
+            return
+        build_one_file(state)
+
+
 def repair_whole_project(state: BuildState) -> None:
     contents = current_contents(state)
     if not contents:
         return
     try:
         deterministic_project_repair(state)
-        contents = current_contents(state)
+        quality = score_product_quality(current_contents(state))
         state.logs.append("Agent memory used:\n" + memory_context(" ".join(state.logs[-20:])))
-        repaired = repair_project(state.spec, contents)
+        if quality.total < QUALITY_PASS_SCORE or quality.issues:
+            state.logs.append("Product Architect guidance:\n" + quality_repair_prompt(quality))
+        repaired = repair_project(state.spec, current_contents(state))
         changed = apply_repaired_contents(state, repaired)
         state.logs.append(f"Whole-project quality repair updated {changed} file(s)" if changed else "Whole-project quality repair checked")
     except Exception as exc:
@@ -200,12 +255,17 @@ def real_build_check_and_repair(state: BuildState, rounds: int = 6) -> bool:
 
 def mark_validity(state: BuildState, build_ok: bool) -> bool:
     ok, errors = validate_project_against_spec(current_contents(state), state.spec.files)
-    state.status = "valid" if ok and build_ok else "invalid"
+    quality_ok = product_quality_check(state)
+    state.status = "valid" if ok and build_ok and quality_ok else "invalid"
     if errors:
         state.logs.extend(errors[:30])
         learn_from_errors(state, errors, category="project_validation")
+    elif build_ok and quality_ok:
+        state.logs.append("Project valid")
+    elif build_ok and not quality_ok:
+        state.logs.append("Project build passed but product quality failed")
     else:
-        state.logs.extend(["Project valid"] if build_ok else ["Project invalid: real build failed"])
+        state.logs.append("Project invalid: real build failed")
     return state.status == "valid"
 
 
@@ -221,13 +281,13 @@ def run_agent_on_state(state: BuildState, req: AgentRunRequest) -> dict:
     success = None
     if any(term in role_text for term in ["repair", "validator", "tester", "build", "dependency", "vite", "import", "export"]):
         repair_whole_project(state)
-        build_ok = real_build_check_and_repair(state, rounds=4)
-        success = mark_validity(state, build_ok)
-    elif any(term in role_text for term in ["architect", "plan", "topology"]):
-        state.logs.append("Architect Agent reviewed blueprint, topology, files, and acceptance criteria")
+        success = mark_validity(state, real_build_check_and_repair(state, rounds=4))
+    elif any(term in role_text for term in ["architect", "plan", "topology", "product"]):
+        state.logs.append("Product Architect reviewed blueprint, topology, workflows, data, and acceptance criteria")
+        state.logs.append("Product Architect guidance:\n" + quality_repair_prompt(score_product_quality(current_contents(state))))
     elif any(term in role_text for term in ["design", "ui", "ux", "dashboard", "css"]):
-        state.logs.append("Designer Agent marked UI/design pass for next generation or repair round")
         repair_whole_project(state)
+        success = product_quality_check(state)
     else:
         state.logs.append("Specialist Agent recorded project context for future tasks")
     memory = " | ".join(state.logs[-12:])
@@ -255,7 +315,7 @@ def run_agent_team(state: BuildState, req: TeamRunRequest) -> dict:
             if project:
                 state = project
             summary = state.logs[-1] if state.logs else f"{step.name} completed"
-            actions = [line for line in state.logs[-10:] if any(token in line.lower() for token in ["accepted", "rejected", "repair", "valid", "invalid", "agent"])]
+            actions = [line for line in state.logs[-10:] if any(token in line.lower() for token in ["accepted", "rejected", "repair", "valid", "invalid", "agent", "quality"])]
             handoff_text = f"{step.name}: {summary}"
             run.handoffs.append({"agent": step.name, "cycle": cycle + 1, "summary": summary, "actions": actions[-6:], "handoff": handoff_text})
             finish_step(step, "complete", summary, actions[-6:], handoff_text, 0.82 if state.status != "invalid" else 0.55)
@@ -294,7 +354,8 @@ def timeline_for(state: BuildState) -> dict:
         events.append({"kind": "snapshot", "title": "Snapshot saved", "detail": f"{item.get('snapshot_id')} — {item.get('label')}", "status": item.get("status"), "created_at": item.get("created_at")})
     for index, line in enumerate(state.logs[-180:]):
         lower = line.lower(); kind = "log"; title = "Log"
-        if "spec locked" in lower: kind, title = "plan", "Blueprint/spec locked"
+        if "product quality" in lower: kind, title = "quality", "Product quality"
+        elif "spec locked" in lower: kind, title = "plan", "Blueprint/spec locked"
         elif line.startswith("Accepted "): kind, title = "file", "File accepted"
         elif line.startswith("Rejected "): kind, title = "error", "File rejected"
         elif "agent team" in lower or "team step" in lower: kind, title = "team", "Agent team"
@@ -313,17 +374,6 @@ def timeline_for(state: BuildState) -> dict:
     return {"project_id": state.project_id, "events": events[-240:]}
 
 
-def fill_missing_files(state: BuildState, limit: int = 80) -> None:
-    state.status = "building"
-    for _ in range(limit):
-        pending = [f for f in state.files.values() if f.status != "valid"]
-        if not pending:
-            state.status = "complete"
-            state.logs.append("All planned files generated")
-            return
-        build_one_file(state)
-
-
 def autonomous_run(state: BuildState, req: AutonomousRequest) -> dict:
     max_rounds = max(1, min(req.max_rounds or 10, 20))
     state.logs.append(f"Autonomous mode started for up to {max_rounds} round(s)")
@@ -332,27 +382,24 @@ def autonomous_run(state: BuildState, req: AutonomousRequest) -> dict:
     result = {"build_ok": False, "last_error": "not run"}
     last_error = ""; repeated = 0
     for round_no in range(1, max_rounds + 1):
-        state.logs.append(f"Autonomous round {round_no}: generate missing files")
         fill_missing_files(state, limit=80)
         snap(state, f"autonomous round {round_no} before repair")
         repair_whole_project(state)
-        build_ok = real_build_check_and_repair(state, rounds=3)
-        mark_validity(state, build_ok)
+        mark_validity(state, real_build_check_and_repair(state, rounds=3))
         remember(state)
         result = start_sandbox(state)
         snap(state, f"autonomous round {round_no} after sandbox")
         remember(state)
-        if result.get("build_ok") or state.status == "valid":
-            state.status = "valid"
-            state.logs.append(f"Autonomous mode finished: build passed on round {round_no}")
+        if result.get("build_ok") and state.status == "valid":
+            state.logs.append(f"Autonomous mode finished: build and quality passed on round {round_no}")
             snap(state, "autonomous build passed")
             remember(state)
             return result
-        signature = str(result.get("last_error") or "")[-1500:]
+        signature = str(result.get("last_error") or state.logs[-1] if state.logs else "")[-1500:]
         repeated = repeated + 1 if signature and signature == last_error else 0
         last_error = signature
         if repeated >= 1:
-            state.logs.append("Autonomous mode paused: same error repeated. Add steering instruction and run again.")
+            state.logs.append("Autonomous mode paused: same issue repeated. Add steering instruction and run again.")
             state.status = "invalid"
             remember(state)
             return result
@@ -367,52 +414,13 @@ def sse(data: dict) -> str:
 
 
 def autonomous_stream_events(state: BuildState, instruction: str, max_rounds: int):
-    max_rounds = max(1, min(max_rounds or 10, 20))
-    state.logs.append(f"Autonomous stream started for up to {max_rounds} round(s)")
-    state.logs.append("Instruction: " + instruction)
     state.logs.append("Agent memory context:\n" + memory_context(instruction))
     snap(state, "autonomous stream start")
     remember(state)
     yield sse({"kind": "auto", "title": "Autonomous mode started", "detail": instruction, "status": state.status})
-    last_error = ""; repeated = 0
-    for round_no in range(1, max_rounds + 1):
-        yield sse({"kind": "auto", "title": f"Round {round_no}", "detail": "Generating missing files", "status": state.status})
-        fill_missing_files(state, limit=80)
-        snap(state, f"stream round {round_no} generated")
-        remember(state)
-        yield sse({"kind": "snapshot", "title": "Snapshot saved", "detail": f"Round {round_no} generated files", "status": state.status})
-        yield sse({"kind": "repair", "title": f"Round {round_no}", "detail": "Repairing whole project and connected build errors", "status": state.status})
-        repair_whole_project(state)
-        build_ok = real_build_check_and_repair(state, rounds=3)
-        mark_validity(state, build_ok)
-        remember(state)
-        yield sse({"kind": "repair", "title": "Repair finished", "detail": state.logs[-1] if state.logs else "repair complete", "status": state.status})
-        yield sse({"kind": "sandbox", "title": f"Round {round_no}", "detail": "Starting sandbox", "status": state.status})
-        result = start_sandbox(state)
-        snap(state, f"stream round {round_no} sandbox")
-        remember(state)
-        if result.get("build_ok") or state.status == "valid":
-            state.status = "valid"
-            state.logs.append(f"Autonomous stream finished: build passed on round {round_no}")
-            snap(state, "autonomous stream build passed")
-            remember(state)
-            yield sse({"kind": "success", "title": "Build passed", "detail": f"Passed on round {round_no}", "status": state.status, "done": True})
-            return
-        signature = str(result.get("last_error") or "")[-1500:]
-        yield sse({"kind": "error", "title": "Build not green", "detail": signature or "Sandbox did not report green", "status": state.status})
-        repeated = repeated + 1 if signature and signature == last_error else 0
-        last_error = signature
-        if repeated >= 1:
-            state.status = "invalid"
-            state.logs.append("Autonomous stream paused: same error repeated. Add steering instruction and run again.")
-            learn_from_errors(state, [signature], category="autonomous_repeated_error")
-            remember(state)
-            yield sse({"kind": "pause", "title": "Paused", "detail": "Same error repeated. Add steering instruction and run again.", "status": state.status, "done": True})
-            return
-    state.status = "invalid"
-    state.logs.append("Autonomous stream paused: round limit reached. Add steering instruction and run again.")
-    remember(state)
-    yield sse({"kind": "pause", "title": "Paused", "detail": "Round limit reached. Add steering instruction and run again.", "status": state.status, "done": True})
+    result = autonomous_run(state, AutonomousRequest(instruction=instruction, max_rounds=max_rounds))
+    yield sse({"kind": "success" if state.status == "valid" else "pause", "title": "Autonomous finished", "detail": state.logs[-1] if state.logs else "done", "status": state.status, "sandbox": result, "done": True})
+
 
 @app.get("/agents")
 def agents_list(): return {"agents": [dump_model(agent) for agent in list_agents()]}
@@ -442,8 +450,10 @@ def project_team_runs(project_id: str, limit: int = 50):
     return {"project_id": project_id, "team_runs": [dump_model(run) for run in list_team_runs(project_id, limit=limit)]}
 
 @app.post("/projects/{project_id}/team/run")
-def project_team_run(project_id: str, req: TeamRunRequest):
-    return run_agent_team(get_project(project_id), req)
+def project_team_run(project_id: str, req: TeamRunRequest): return run_agent_team(get_project(project_id), req)
+
+@app.get("/projects/{project_id}/quality")
+def project_quality(project_id: str): return quality_as_dict(score_product_quality(current_contents(get_project(project_id))))
 
 @app.post("/projects")
 def create_project(req: BuildRequest) -> BuildState:
@@ -467,7 +477,8 @@ def change_project(project_id: str, req: ChangeRequest) -> BuildState:
     for path, purpose in state.spec.files.items():
         if path not in state.files:
             state.files[path] = FileSpec(path=path, purpose=purpose)
-    state.status = "planned"; state.logs.append(f"Instruction applied: {req.instruction}")
+    state.status = "planned"
+    state.logs.append(f"Instruction applied: {req.instruction}")
     state.logs.append("Agent memory context:\n" + memory_context(req.instruction))
     specialist = get_or_create_specialist(req.instruction)
     remember_agent_result(specialist, state.project_id, f"Instruction applied: {req.instruction}")
@@ -487,8 +498,9 @@ def build_all(project_id: str) -> BuildState:
     snap(state, "before build all")
     fill_missing_files(state, MAX_BUILD_ALL_STEPS)
     if state.status == "complete":
-        snap(state, "files generated"); repair_whole_project(state)
-        if real_build_check_and_repair(state): state.status = "valid"
+        snap(state, "files generated")
+        repair_whole_project(state)
+        mark_validity(state, real_build_check_and_repair(state))
     snap(state, "after build all")
     return remember(state)
 
@@ -505,8 +517,7 @@ def resume_project(project_id: str) -> BuildState:
 @app.post("/projects/{project_id}/validate")
 def validate_project(project_id: str) -> BuildState:
     state = get_project(project_id); snap(state, "before validate")
-    repair_whole_project(state); build_ok = real_build_check_and_repair(state)
-    mark_validity(state, build_ok); snap(state, "after validate")
+    repair_whole_project(state); mark_validity(state, real_build_check_and_repair(state)); snap(state, "after validate")
     return remember(state)
 
 @app.post("/projects/{project_id}/autonomous")
@@ -516,8 +527,7 @@ def autonomous_project(project_id: str, req: AutonomousRequest):
 
 @app.get("/projects/{project_id}/autonomous/stream")
 def autonomous_project_stream(project_id: str, instruction: str = "Work through the project until it runs.", max_rounds: int = 10):
-    state = get_project(project_id)
-    return StreamingResponse(autonomous_stream_events(state, instruction, max_rounds), media_type="text/event-stream")
+    return StreamingResponse(autonomous_stream_events(get_project(project_id), instruction, max_rounds), media_type="text/event-stream")
 
 @app.get("/projects/{project_id}/graph")
 def get_graph(project_id: str): return project_graph(get_project(project_id))
@@ -568,15 +578,14 @@ def sandbox_fix(project_id: str, req: SandboxFixRequest):
     agent = get_or_create_specialist(req.instruction + " dependency build repair")
     remember_agent_result(agent, state.project_id, f"Sandbox fix requested: {req.instruction}")
     state.logs.append(f"Agent assigned: {agent.name}")
-    repair_whole_project(state)
-    if real_build_check_and_repair(state): state.status = "valid"
+    repair_whole_project(state); mark_validity(state, real_build_check_and_repair(state))
     snap(state, "after sandbox fix"); remember(state)
     return start_sandbox(state)
 
 @app.get("/projects/{project_id}/export")
 def export(project_id: str):
     state = get_project(project_id)
-    if state.status != "valid": state.logs.append("Snapshot exported while build was not valid")
+    if state.status != "valid": state.logs.append("Snapshot exported while project was not valid")
     snap(state, "exported snapshot"); path = export_project(state)
     safe_name = state.spec.app_name.replace(" ", "_"); save_project(state)
     return FileResponse(path, filename=f"{safe_name}_snapshot.zip")
