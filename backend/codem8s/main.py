@@ -19,6 +19,7 @@ from .snapshot_store import create_snapshot, list_snapshots, restore_snapshot
 from .agent_registry import AgentCreateRequest, AgentRunRequest, create_agent, find_agent, get_or_create_specialist, list_agents, remember_agent_result
 from .agent_memory import MemoryCreateRequest, create_memory, list_memory, search_memory
 from .agent_team import TeamRunRequest, create_team_run, finish_step, get_team_run, list_team_runs, save_team_run
+from .consistency_repair import deterministic_consistency_repair
 
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -136,11 +137,25 @@ def current_contents(state: BuildState) -> dict[str, str]:
     return {path: item.content for path, item in state.files.items() if item.content}
 
 
+def deterministic_project_repair(state: BuildState) -> int:
+    contents = current_contents(state)
+    if not contents:
+        return 0
+    repaired, logs = deterministic_consistency_repair(contents)
+    changed = apply_repaired_contents(state, repaired)
+    state.logs.extend(logs)
+    if changed:
+        state.logs.append(f"Deterministic consistency repair updated {changed} file(s)")
+    return changed
+
+
 def repair_whole_project(state: BuildState) -> None:
     contents = current_contents(state)
     if not contents:
         return
     try:
+        deterministic_project_repair(state)
+        contents = current_contents(state)
         state.logs.append("Agent memory used:\n" + memory_context(" ".join(state.logs[-20:])))
         repaired = repair_project(state.spec, contents)
         changed = apply_repaired_contents(state, repaired)
@@ -155,6 +170,7 @@ def real_build_failed(logs: list[str]) -> bool:
 
 
 def real_build_check_and_repair(state: BuildState, rounds: int = 6) -> bool:
+    deterministic_project_repair(state)
     contents = current_contents(state)
     if not contents:
         return False
@@ -284,6 +300,7 @@ def timeline_for(state: BuildState) -> dict:
         elif "agent team" in lower or "team step" in lower: kind, title = "team", "Agent team"
         elif "agent memory" in lower: kind, title = "memory", "Agent memory"
         elif "agent" in lower: kind, title = "agent", "Agent activity"
+        elif "deterministic consistency" in lower: kind, title = "repair", "Consistency repair"
         elif "autonomous" in lower: kind, title = "auto", "Autonomous mode"
         elif "sandbox" in lower and "fix" in lower: kind, title = "repair", "Sandbox repair"
         elif "real build repair" in lower or "dependency-aware" in lower: kind, title = "repair", "Real build repair"
