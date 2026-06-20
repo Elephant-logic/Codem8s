@@ -33,6 +33,17 @@ export default function App() {
     return { total, valid, rejected, label: total ? `${valid}/${total} valid` : '0/0 valid' };
   }, [state]);
 
+  const planner = useMemo(() => {
+    if (!state?.spec) return null;
+    const fileEntries = Object.entries(state.spec.files || {});
+    const entryPoints = fileEntries.filter(([path]) => /main\.jsx$|App\.jsx$|index\.html$|main\.py$|package\.json$/.test(path));
+    const frontend = fileEntries.filter(([path]) => path.startsWith('frontend/'));
+    const backend = fileEntries.filter(([path]) => path.startsWith('backend/'));
+    const data = fileEntries.filter(([path]) => /data|state|store|model/i.test(path));
+    const systems = fileEntries.filter(([path]) => /system|engine|service|manager|game/i.test(path));
+    return { fileEntries, entryPoints, frontend, backend, data, systems };
+  }, [state]);
+
   const graphDetails = useMemo(() => {
     if (!graph || !selectedNode) return null;
     const imports = graph.edges.filter((edge) => edge.to === selectedNode.path).map((edge) => edge.from);
@@ -229,7 +240,7 @@ export default function App() {
   return (
     <main className="app">
       <h1>Codem8s Full Stack</h1>
-      <p>Locked spec. Build all. Pause/resume. Live steering. No fake code saved.</p>
+      <p>Plan first. Review topology. Then generate, sandbox, repair, snapshot, and export.</p>
       <p><b>Backend:</b> {API}</p>
       {error && <section className="card bad"><b>Error:</b> {error}</section>}
 
@@ -245,19 +256,27 @@ export default function App() {
           <h2>Idea</h2>
           <textarea value={idea} onChange={(event) => setIdea(event.target.value)} />
           <label className="check"><input type="checkbox" checked={useAi} onChange={(event) => setUseAi(event.target.checked)} /> Use OpenAI for generation</label>
-          <div className="row"><button onClick={createProject} disabled={busy}>Create Spec</button><button onClick={buildNext} disabled={!state || busy}>Build Next</button><button onClick={buildAll} disabled={!state || busy}>Build All</button><button onClick={pauseBuild} disabled={!state || busy}>Pause</button><button onClick={resumeBuild} disabled={!state || busy}>Resume</button><button onClick={validate} disabled={!state || busy}>Validate</button><button onClick={exportZip} disabled={!state}>Export Snapshot</button></div>
+          <div className="row"><button onClick={createProject} disabled={busy}>Create / Review Plan</button><button onClick={buildNext} disabled={!state || busy}>Build Next</button><button onClick={buildAll} disabled={!state || busy}>Approve Plan + Build All</button><button onClick={pauseBuild} disabled={!state || busy}>Pause</button><button onClick={resumeBuild} disabled={!state || busy}>Resume</button><button onClick={validate} disabled={!state || busy}>Validate</button><button onClick={exportZip} disabled={!state}>Export Snapshot</button></div>
           {state && <p><b>Status:</b> {state.status} | <b>Progress:</b> {progress.label} | <b>Rejected:</b> {progress.rejected}</p>}
-          <h2>Steer While Building</h2><textarea value={change} onChange={(event) => setChange(event.target.value)} placeholder="Add login, switch to SQLite, make it mobile first" /><button onClick={applyChange} disabled={!state || busy}>Apply Instruction</button>
+          <h2>Steer While Building</h2><textarea value={change} onChange={(event) => setChange(event.target.value)} placeholder="Change the plan before building, or steer repairs after sandbox errors" /><button onClick={applyChange} disabled={!state || busy}>Apply Instruction</button>
         </section>
         <section className="card"><h2>Spec</h2><pre className="log">{state ? JSON.stringify(state.spec, null, 2) : 'No project yet'}</pre></section>
       </div>
 
+      <section className="card planner-card">
+        <div className="split-head"><div><h2>Planner Review</h2><p>Review the architecture before file generation starts. Use Apply Instruction to change it, then approve with Build All.</p></div><button onClick={refreshGraph} disabled={!state}>Refresh Plan Map</button></div>
+        {planner ? <>
+          <div className="planner-metrics"><span>{planner.fileEntries.length} files planned</span><span>{planner.frontend.length} frontend</span><span>{planner.backend.length} backend</span><span>{planner.systems.length} systems/game/service</span><span>{planner.data.length} data/state</span></div>
+          <div className="planner-grid">
+            <div><h3>Goal</h3><p>{state.spec.goal}</p><h3>Features</h3><ul>{state.spec.features.map((feature) => <li key={feature}>{feature}</li>)}</ul></div>
+            <div><h3>Entry points</h3><pre className="log">{planner.entryPoints.map(([path, purpose]) => `${path} — ${purpose}`).join('\n') || 'none detected'}</pre><h3>Planned file map</h3><pre className="log planner-files">{planner.fileEntries.map(([path, purpose]) => `${path} — ${purpose}`).join('\n')}</pre></div>
+          </div>
+        </> : <p>Create / Review Plan first.</p>}
+      </section>
+
       <section className="card timeline-card">
         <div className="split-head"><div><h2>Live Timeline</h2><p>Clear steps from planning, snapshots, build, repair, and sandbox activity.</p></div><button onClick={refreshTimeline} disabled={!state}>Refresh Timeline</button></div>
-        <div className="timeline-list">
-          {timeline.slice().reverse().map((event, index) => <div className={`timeline-item ${event.kind}`} key={`${event.kind}-${index}-${event.detail}`}><b>{event.title}</b><span>{event.detail}</span>{fmtTime(event.created_at) && <small>{fmtTime(event.created_at)}</small>}</div>)}
-          {!timeline.length && <p>No timeline events yet.</p>}
-        </div>
+        <div className="timeline-list">{timeline.slice().reverse().map((event, index) => <div className={`timeline-item ${event.kind}`} key={`${event.kind}-${index}-${event.detail}`}><b>{event.title}</b><span>{event.detail}</span>{fmtTime(event.created_at) && <small>{fmtTime(event.created_at)}</small>}</div>)}{!timeline.length && <p>No timeline events yet.</p>}</div>
       </section>
 
       <section className="card snapshot-card">
