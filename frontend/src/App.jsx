@@ -236,22 +236,31 @@ export default function App() {
   async function workUntilItRuns() {
     if (!state) return;
     setSandboxBusy(true); setBusy(true); setError('');
-    try {
-      const data = await request(`/projects/${state.project_id}/autonomous`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instruction: sandboxInstruction, max_rounds: 10 }),
-      });
-      if (data.project) setState(data.project);
-      if (data.sandbox) setSandbox(data.sandbox);
-      if (data.timeline?.events) setTimeline(data.timeline.events);
-      await refreshSandboxLogs();
-      await refreshProjectMeta();
-    } catch (err) {
-      setError(`Autonomous mode stopped: ${String(err.message || err)}`);
-    } finally {
+    const encodedInstruction = encodeURIComponent(sandboxInstruction || 'Work through the project until it runs.');
+    const url = `${API}/projects/${state.project_id}/autonomous/stream?max_rounds=10&instruction=${encodedInstruction}`;
+    const source = new EventSource(url);
+    let finished = false;
+    source.onmessage = (event) => {
+      try {
+        const item = JSON.parse(event.data);
+        setTimeline((current) => [...current, item]);
+        if (item.detail) setSandboxLogLines((current) => [...current.slice(-250), `[${item.title}] ${item.detail}`]);
+        if (item.done) {
+          finished = true;
+          source.close();
+          refreshSandboxLogs().then(refreshProjectMeta);
+          setSandboxBusy(false); setBusy(false);
+        }
+      } catch (err) {
+        setError(`Stream parse error: ${String(err.message || err)}`);
+      }
+    };
+    source.onerror = () => {
+      source.close();
+      if (!finished) setError('Autonomous stream stopped. Refresh timeline/logs to see final state.');
+      refreshSandboxLogs().then(refreshProjectMeta);
       setSandboxBusy(false); setBusy(false);
-    }
+    };
   }
 
   async function refreshSandboxAll() { await refreshSandboxLogs(); await refreshTimeline(); }
