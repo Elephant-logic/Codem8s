@@ -68,7 +68,6 @@ def extract_missing_export_problems(output: str) -> list[dict[str, str]]:
     text = strip_ansi(output)
     problems: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
-
     patterns = [
         r'\[MISSING_EXPORT\]\s+"(?P<name>[^"]+)"\s+is not exported by\s+"(?P<path>[^"]+)"',
         r'"(?P<name>[^"]+)"\s+is not exported by\s+"(?P<path>[^"]+)"',
@@ -104,15 +103,12 @@ def check_frontend(root: Path) -> list[dict[str, str]]:
     frontend = root / "frontend"
     if not frontend.exists() or not (frontend / "package.json").exists():
         return []
-
     ok, out = run_cmd(["npm", "install", "--silent"], frontend, timeout=180)
     if not ok:
         return [{"path": "frontend/package.json", "error": "npm install failed\n" + out}]
-
     ok, out = run_cmd(["npm", "run", "build"], frontend, timeout=180)
     if ok:
         return []
-
     missing = extract_missing_export_problems(out)
     if missing:
         return missing
@@ -137,32 +133,69 @@ def topology_for(path: str, blueprint: dict) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
+def connected_group(path: str, blueprint: dict, files: dict[str, str]) -> dict:
+    topo = blueprint.get("dependency_topology") or {}
+    if not isinstance(topo, dict):
+        topo = {}
+    meta = topology_for(path, blueprint)
+    imports = [p for p in meta.get("imports", []) if p in files]
+    dependents = []
+    for candidate, candidate_meta in topo.items():
+        if isinstance(candidate_meta, dict) and path in candidate_meta.get("imports", []) and candidate in files:
+            dependents.append(candidate)
+    # Also infer dependents from raw source text when blueprint is stale.
+    stem = path.split("/")[-1].rsplit(".", 1)[0]
+    for candidate, content in files.items():
+        if candidate == path or candidate in dependents:
+            continue
+        if stem in content and "import" in content[:2500]:
+            dependents.append(candidate)
+    group = []
+    for item in [path, *imports, *dependents]:
+        if item in files and item not in group:
+            group.append(item)
+    return {
+        "target": path,
+        "imports": imports,
+        "dependents": dependents,
+        "files": {p: files[p][:12000] for p in group[:12]},
+        "topology": {p: topology_for(p, blueprint) for p in group[:12]},
+    }
+
+
 def repair_file_against_error(spec: ProjectSpec, path: str, files: dict[str, str], error: str, missing_export: str | None = None) -> str | None:
     blueprint = blueprint_from_spec(spec)
     existing_paths = list(files.keys())
-    compact_files = {p: c[:7000] for p, c in files.items()}
+    compact_files = {p: c[:3000] for p, c in files.items()}
     current = files.get(path, "")
     topology = topology_for(path, blueprint)
+    group = connected_group(path, blueprint, files)
 
     system = f"""
-You are Codem8s Build Repair.
+You are Codem8s Dependency-Aware Build Repair.
 Return JSON only: {{"content": "full replacement file contents"}}
 
-Repair the target file against the REAL Vite/Python build error.
+Repair the TARGET FILE against the REAL Vite/Python build error, using its connected dependency group.
 
 Target file: {path}
 Target file rule: {expected_file_rule(path)}
-Topology contract for target file: {json.dumps(topology, indent=2)}
+Target topology contract: {json.dumps(topology, indent=2)}
 Missing export to satisfy: {missing_export or "none"}
 
-Rules:
+Dependency-aware rules:
+- Treat the connected files as one circuit: target imports, target dependents, and topology contracts must agree.
+- If a dependent imports a named/default export from the target, the target must export exactly that name/default.
+- If the target imports from a neighbour, do not invent imports that neighbour does not export.
+- Prefer stable named exports for app modules unless the import explicitly needs default.
+- Make the smallest target-file change that makes the circuit consistent.
+
+General rules:
 - Fix the actual error, not a guess.
 - No markdown.
 - No placeholders.
 - No TODO/future-work comments.
 - Keep language correct for file extension.
 - Only import files listed in existing_paths.
-- If the error says a name/default is not exported by this file, make this file export that exact name/default.
 - Do not remove working functionality just to make the build pass.
 - React/Vite files must compile.
 - Python files must compile.
@@ -173,10 +206,11 @@ Rules:
         "existing_paths": existing_paths,
         "build_error": strip_ansi(error),
         "current_file": current[:14000],
-        "all_files": compact_files,
+        "connected_dependency_group": group,
+        "all_files_compact_index": compact_files,
         "blueprint_summary": {"app_name": blueprint.get("app_name"), "goal": blueprint.get("goal"), "kind": blueprint.get("kind")},
     }
-    data = chat_json(system, json.dumps(payload, indent=2), temperature=0.10)
+    data = chat_json(system, json.dumps(payload, indent=2), temperature=0.08)
     if data and isinstance(data.get("content"), str):
         return clean(data["content"])
     return None
@@ -185,45 +219,37 @@ Rules:
 def real_build_repair_project(spec: ProjectSpec, files: dict[str, str], max_rounds: int = 6) -> tuple[dict[str, str], list[str], bool]:
     changed = dict(files)
     logs: list[str] = []
-
     for round_number in range(1, max_rounds + 1):
         with tempfile.TemporaryDirectory(prefix="codem8s_build_") as tmp:
             root = Path(tmp)
             write_project(root, changed)
             problems = check_python(root)
             problems.extend(check_frontend(root))
-
         if not problems:
             logs.append(f"Real build check passed on round {round_number}")
             return changed, logs, True
-
         logs.append(f"Real build check found {len(problems)} problem(s) on round {round_number}")
         repaired_any = False
-
         for problem in problems[:10]:
             path = problem.get("path") or ""
             error = problem.get("error") or ""
             missing_export = problem.get("missing_export")
-
             if path not in changed:
                 if path.startswith("frontend/") and "frontend/src/App.jsx" in changed:
                     path = "frontend/src/App.jsx"
                 else:
                     logs.append(f"Could not repair missing target: {problem.get('path')}")
                     continue
-
             repaired = repair_file_against_error(spec, path, changed, error, missing_export=missing_export)
             if repaired:
                 changed[path] = repaired
                 repaired_any = True
                 extra = f" export {missing_export}" if missing_export else ""
-                logs.append(f"Repaired {path}{extra} from real build error")
+                logs.append(f"Dependency-aware repair updated {path}{extra}")
             else:
                 logs.append(f"Repair failed for {path}")
-
         if not repaired_any:
             logs.append("Real build repair could not repair any files this round")
             return changed, logs, False
-
     logs.append("Real build repair stopped with remaining build problems")
     return changed, logs, False
