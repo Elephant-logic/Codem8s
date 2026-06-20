@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from uuid import uuid4
 from .models import BuildRequest, ChangeRequest, BuildState, FileSpec
@@ -229,6 +229,58 @@ def autonomous_run(state: BuildState, req: AutonomousRequest) -> dict:
     remember(state)
     return result
 
+
+def sse(data: dict) -> str:
+    return "data: " + json.dumps(data, default=str) + "\n\n"
+
+
+def autonomous_stream_events(state: BuildState, instruction: str, max_rounds: int):
+    max_rounds = max(1, min(max_rounds or 10, 20))
+    state.logs.append(f"Autonomous stream started for up to {max_rounds} round(s)")
+    state.logs.append("Instruction: " + instruction)
+    snap(state, "autonomous stream start")
+    remember(state)
+    yield sse({"kind": "auto", "title": "Autonomous mode started", "detail": instruction, "status": state.status})
+    last_error = ""
+    repeated = 0
+    for round_no in range(1, max_rounds + 1):
+        yield sse({"kind": "auto", "title": f"Round {round_no}", "detail": "Generating missing files", "status": state.status})
+        fill_missing_files(state, limit=80)
+        snap(state, f"stream round {round_no} generated")
+        remember(state)
+        yield sse({"kind": "snapshot", "title": "Snapshot saved", "detail": f"Round {round_no} generated files", "status": state.status})
+        yield sse({"kind": "repair", "title": f"Round {round_no}", "detail": "Repairing whole project and connected build errors", "status": state.status})
+        repair_whole_project(state)
+        build_ok = real_build_check_and_repair(state, rounds=3)
+        mark_validity(state, build_ok)
+        remember(state)
+        yield sse({"kind": "repair", "title": "Repair finished", "detail": state.logs[-1] if state.logs else "repair complete", "status": state.status})
+        yield sse({"kind": "sandbox", "title": f"Round {round_no}", "detail": "Starting sandbox", "status": state.status})
+        result = start_sandbox(state)
+        snap(state, f"stream round {round_no} sandbox")
+        remember(state)
+        if result.get("build_ok") or state.status == "valid":
+            state.status = "valid"
+            state.logs.append(f"Autonomous stream finished: build passed on round {round_no}")
+            snap(state, "autonomous stream build passed")
+            remember(state)
+            yield sse({"kind": "success", "title": "Build passed", "detail": f"Passed on round {round_no}", "status": state.status, "done": True})
+            return
+        signature = str(result.get("last_error") or "")[-1500:]
+        yield sse({"kind": "error", "title": "Build not green", "detail": signature or "Sandbox did not report green", "status": state.status})
+        repeated = repeated + 1 if signature and signature == last_error else 0
+        last_error = signature
+        if repeated >= 1:
+            state.status = "invalid"
+            state.logs.append("Autonomous stream paused: same error repeated. Add steering instruction and run again.")
+            remember(state)
+            yield sse({"kind": "pause", "title": "Paused", "detail": "Same error repeated. Add steering instruction and run again.", "status": state.status, "done": True})
+            return
+    state.status = "invalid"
+    state.logs.append("Autonomous stream paused: round limit reached. Add steering instruction and run again.")
+    remember(state)
+    yield sse({"kind": "pause", "title": "Paused", "detail": "Round limit reached. Add steering instruction and run again.", "status": state.status, "done": True})
+
 @app.post("/projects")
 def create_project(req: BuildRequest) -> BuildState:
     spec = build_spec(req.idea, req.stack)
@@ -287,6 +339,11 @@ def autonomous_project(project_id: str, req: AutonomousRequest):
     state = get_project(project_id)
     result = autonomous_run(state, req)
     return {"project": remember(state), "sandbox": result, "timeline": timeline_for(state)}
+
+@app.get("/projects/{project_id}/autonomous/stream")
+def autonomous_project_stream(project_id: str, instruction: str = "Work through the project until it runs.", max_rounds: int = 10):
+    state = get_project(project_id)
+    return StreamingResponse(autonomous_stream_events(state, instruction, max_rounds), media_type="text/event-stream")
 
 @app.get("/projects/{project_id}/graph")
 def get_graph(project_id: str): return project_graph(get_project(project_id))
