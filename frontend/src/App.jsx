@@ -233,6 +233,27 @@ export default function App() {
     finally { setSandboxBusy(false); }
   }
 
+  async function workUntilItRuns() {
+    if (!state) return;
+    setSandboxBusy(true); setBusy(true); setError('');
+    try {
+      const data = await request(`/projects/${state.project_id}/autonomous`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction: sandboxInstruction, max_rounds: 10 }),
+      });
+      if (data.project) setState(data.project);
+      if (data.sandbox) setSandbox(data.sandbox);
+      if (data.timeline?.events) setTimeline(data.timeline.events);
+      await refreshSandboxLogs();
+      await refreshProjectMeta();
+    } catch (err) {
+      setError(`Autonomous mode stopped: ${String(err.message || err)}`);
+    } finally {
+      setSandboxBusy(false); setBusy(false);
+    }
+  }
+
   async function refreshSandboxAll() { await refreshSandboxLogs(); await refreshTimeline(); }
   function openPreview() { if (sandbox?.preview_url) window.open(sandbox.preview_url, '_blank', 'noopener,noreferrer'); }
   function fmtTime(seconds) { return seconds && seconds > 100000 ? new Date(seconds * 1000).toLocaleString() : ''; }
@@ -256,7 +277,7 @@ export default function App() {
           <h2>Idea</h2>
           <textarea value={idea} onChange={(event) => setIdea(event.target.value)} />
           <label className="check"><input type="checkbox" checked={useAi} onChange={(event) => setUseAi(event.target.checked)} /> Use OpenAI for generation</label>
-          <div className="row"><button onClick={createProject} disabled={busy}>Create / Review Plan</button><button onClick={buildNext} disabled={!state || busy}>Build Next</button><button onClick={buildAll} disabled={!state || busy}>Approve Plan + Build All</button><button onClick={pauseBuild} disabled={!state || busy}>Pause</button><button onClick={resumeBuild} disabled={!state || busy}>Resume</button><button onClick={validate} disabled={!state || busy}>Validate</button><button onClick={exportZip} disabled={!state}>Export Snapshot</button></div>
+          <div className="row"><button onClick={createProject} disabled={busy}>Create / Review Plan</button><button onClick={buildNext} disabled={!state || busy}>Build Next</button><button onClick={buildAll} disabled={!state || busy}>Approve Plan + Build All</button><button onClick={workUntilItRuns} disabled={!state || busy || sandboxBusy}>Work Until It Runs</button><button onClick={pauseBuild} disabled={!state || busy}>Pause</button><button onClick={resumeBuild} disabled={!state || busy}>Resume</button><button onClick={validate} disabled={!state || busy}>Validate</button><button onClick={exportZip} disabled={!state}>Export Snapshot</button></div>
           {state && <p><b>Status:</b> {state.status} | <b>Progress:</b> {progress.label} | <b>Rejected:</b> {progress.rejected}</p>}
           <h2>Steer While Building</h2><textarea value={change} onChange={(event) => setChange(event.target.value)} placeholder="Change the plan before building, or steer repairs after sandbox errors" /><button onClick={applyChange} disabled={!state || busy}>Apply Instruction</button>
         </section>
@@ -294,7 +315,7 @@ export default function App() {
         <div className="split-head"><div><h2>Live Sandbox</h2><p>Runs dependency install, build, dev server, and shows the command line output.</p></div><div className="status-pills"><span className={sandbox?.running ? 'pill ok-bg' : 'pill'}>{sandbox?.running ? 'Running' : 'Stopped'}</span><span className={sandbox?.build_ok ? 'pill ok-bg' : 'pill bad-bg'}>{sandbox?.build_ok ? 'Build OK' : 'Build not green'}</span></div></div>
         <div className="row"><button onClick={startSandbox} disabled={!state || sandboxBusy}>Run Sandbox</button><button onClick={stopSandboxRun} disabled={!state || sandboxBusy}>Stop Sandbox</button><button onClick={refreshSandboxAll} disabled={!state || sandboxBusy}>Refresh Logs</button><button onClick={openPreview} disabled={!sandbox?.preview_url}>Open Preview</button></div>
         <h3>AI Fix From Sandbox</h3><textarea value={sandboxInstruction} onChange={(event) => setSandboxInstruction(event.target.value)} placeholder="Tell AI what to try using the command output" />
-        <div className="row"><button onClick={fixFromSandbox} disabled={!state || sandboxBusy}>AI Fix + Re-run</button><button onClick={workThroughSandbox} disabled={!state || sandboxBusy}>Work Through Errors</button></div>
+        <div className="row"><button onClick={fixFromSandbox} disabled={!state || sandboxBusy}>AI Fix + Re-run</button><button onClick={workThroughSandbox} disabled={!state || sandboxBusy}>Work Through Errors</button><button onClick={workUntilItRuns} disabled={!state || busy || sandboxBusy}>Work Until It Runs</button></div>
         {sandbox && <div className="sandbox-status"><p><b>Preview:</b> {sandbox.preview_url || 'not started'}</p><p><b>Root:</b> {sandbox.root || 'not created'}</p>{sandbox.last_error && <pre className="log bad-box">{sandbox.last_error}</pre>}</div>}
         <pre className="log sandbox-log">{sandboxLogLines.length ? sandboxLogLines.join('\n') : 'No sandbox logs yet'}</pre>
       </section>
