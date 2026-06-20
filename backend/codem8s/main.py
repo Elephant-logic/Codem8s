@@ -16,6 +16,7 @@ from .sandbox import start_sandbox, stop_sandbox, sandbox_status, sandbox_logs
 from .project_store import load_all_projects, load_project, save_project
 from .snapshot_store import create_snapshot, list_snapshots, restore_snapshot
 from .agent_registry import AgentCreateRequest, AgentRunRequest, create_agent, find_agent, get_or_create_specialist, list_agents, remember_agent_result
+from .agent_memory import MemoryCreateRequest, create_memory, list_memory, search_memory
 
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -60,6 +61,41 @@ def get_project(project_id: str) -> BuildState:
     return state
 
 
+def learn_from_errors(state: BuildState, errors: list[str], category: str = "build_failure") -> None:
+    for error in errors[:8]:
+        text = str(error)[-2000:]
+        tags = ["auto-learned"]
+        low = text.lower()
+        if "export" in low or "import" in low:
+            tags += ["imports", "exports", "react"]
+        if "vite" in low:
+            tags.append("vite")
+        if "css" in low or "missing local file" in low:
+            tags += ["css", "missing-file"]
+        if "dashboard" in low or "shallow" in low:
+            tags += ["dashboard", "quality"]
+        try:
+            create_memory(MemoryCreateRequest(
+                project_id=state.project_id,
+                category=category,
+                pattern=text.split("\n", 1)[0][:180],
+                symptom=text,
+                fix="Search agent memory, repair the connected dependency chain, then rerun validation/build.",
+                lesson=f"Observed in {state.spec.app_name}: {text}",
+                tags=sorted(set(tags)),
+                success=False,
+            ))
+        except Exception as exc:
+            state.logs.append(f"Agent memory skipped: {exc}")
+
+
+def memory_context(query: str) -> str:
+    matches = search_memory(query, limit=5)
+    if not matches:
+        return "No matching memory yet."
+    return "\n".join(f"- {m.pattern}: {m.fix or m.lesson}" for m in matches)
+
+
 def build_one_file(state: BuildState) -> bool:
     if state.status == "paused":
         state.logs.append("Build paused")
@@ -70,13 +106,19 @@ def build_one_file(state: BuildState) -> bool:
         state.logs.append("All files valid")
         return False
     item = pending[0]
-    content = generate_file(item.path, state.spec, use_ai=state.use_ai, previous_errors=item.errors)
+    hints = memory_context(" ".join(item.errors or []) + " " + item.path)
+    previous = list(item.errors or [])
+    if hints and hints != "No matching memory yet.":
+        previous.append("Relevant agent memory:\n" + hints)
+    content = generate_file(item.path, state.spec, use_ai=state.use_ai, previous_errors=previous)
     ok, errors = validate_file(item.path, content, state.spec.files)
     item.content = content if ok else ""
     item.errors = errors
     item.status = "valid" if ok else "rejected"
     state.current_file = item.path
     state.logs.append(("Accepted " if ok else "Rejected ") + item.path)
+    if errors:
+        learn_from_errors(state, [f"{item.path}: {err}" for err in errors], category="file_validation")
     return True
 
 
@@ -93,6 +135,7 @@ def apply_repaired_contents(state: BuildState, repaired: dict[str, str]) -> int:
                 changed += 1
             else:
                 item.status, item.errors = "rejected", errors
+                learn_from_errors(state, [f"{path}: {err}" for err in errors], category="repair_rejected")
     return changed
 
 
@@ -105,6 +148,7 @@ def repair_whole_project(state: BuildState) -> None:
     if not contents:
         return
     try:
+        state.logs.append("Agent memory used:\n" + memory_context(" ".join(state.logs[-20:])))
         repaired = repair_project(state.spec, contents)
         changed = apply_repaired_contents(state, repaired)
         state.logs.append(f"Whole-project quality repair updated {changed} file(s)" if changed else "Whole-project quality repair checked")
@@ -134,17 +178,25 @@ def real_build_check_and_repair(state: BuildState, rounds: int = 6) -> bool:
         if not ok:
             state.status = "invalid"
             state.logs.append("Project invalid: real npm/Python build did not pass")
+            learn_from_errors(state, logs, category="real_build_failure")
+        else:
+            create_memory(MemoryCreateRequest(project_id=state.project_id, category="successful_repair", pattern="real build passed", fix="Current repair flow produced a passing build", lesson="Build repair succeeded for this project", tags=["build", "success"], success=True))
         return bool(ok)
     except Exception as exc:
         state.status = "invalid"
         state.logs.append(f"Real build repair failed: {exc}")
+        learn_from_errors(state, [str(exc)], category="repair_exception")
         return False
 
 
 def mark_validity(state: BuildState, build_ok: bool) -> bool:
     ok, errors = validate_project_against_spec(current_contents(state), state.spec.files)
     state.status = "valid" if ok and build_ok else "invalid"
-    state.logs.extend(errors[:30] if errors else (["Project valid"] if build_ok else ["Project invalid: real build failed"]))
+    if errors:
+        state.logs.extend(errors[:30])
+        learn_from_errors(state, errors, category="project_validation")
+    else:
+        state.logs.extend(["Project valid"] if build_ok else ["Project invalid: real build failed"])
     return state.status == "valid"
 
 
@@ -154,6 +206,7 @@ def run_agent_on_state(state: BuildState, req: AgentRunRequest) -> dict:
     state.logs.append(f"Agent started: {agent.name}")
     state.logs.append(f"Agent role: {agent.role}")
     state.logs.append(f"Agent goal: {goal}")
+    state.logs.append("Agent memory context:\n" + memory_context(goal + " " + " ".join(state.logs[-20:])))
     snap(state, f"agent {agent.name} start")
     role_text = " ".join([agent.name, agent.role, *agent.skills, goal]).lower()
     success = None
@@ -170,6 +223,7 @@ def run_agent_on_state(state: BuildState, req: AgentRunRequest) -> dict:
         state.logs.append("Specialist Agent recorded project context for future tasks")
     memory = " | ".join(state.logs[-12:])
     agent = remember_agent_result(agent, state.project_id, memory=memory, success=success)
+    create_memory(MemoryCreateRequest(agent_id=agent.agent_id, project_id=state.project_id, category="agent_handoff", pattern=f"{agent.name} ran", lesson=memory, tags=["agent", *agent.skills], success=success))
     snap(state, f"agent {agent.name} finish")
     remember(state)
     return {"agent": dump_model(agent), "project": state, "timeline": timeline_for(state)}
@@ -202,6 +256,7 @@ def timeline_for(state: BuildState) -> dict:
         if "spec locked" in lower: kind, title = "plan", "Blueprint/spec locked"
         elif line.startswith("Accepted "): kind, title = "file", "File accepted"
         elif line.startswith("Rejected "): kind, title = "error", "File rejected"
+        elif "agent memory" in lower: kind, title = "memory", "Agent memory"
         elif "agent" in lower: kind, title = "agent", "Agent activity"
         elif "autonomous" in lower: kind, title = "auto", "Autonomous mode"
         elif "sandbox" in lower and "fix" in lower: kind, title = "repair", "Sandbox repair"
@@ -231,9 +286,9 @@ def autonomous_run(state: BuildState, req: AutonomousRequest) -> dict:
     state.logs.append(f"Autonomous mode started for up to {max_rounds} round(s)")
     state.logs.append("Instruction: " + req.instruction)
     snap(state, "autonomous start")
+    result = {"build_ok": False, "last_error": "not run"}
     last_error = ""
     repeated = 0
-    result = {"build_ok": False, "last_error": "not run"}
     for round_no in range(1, max_rounds + 1):
         state.logs.append(f"Autonomous round {round_no}: generate missing files")
         fill_missing_files(state, limit=80)
@@ -273,6 +328,7 @@ def autonomous_stream_events(state: BuildState, instruction: str, max_rounds: in
     max_rounds = max(1, min(max_rounds or 10, 20))
     state.logs.append(f"Autonomous stream started for up to {max_rounds} round(s)")
     state.logs.append("Instruction: " + instruction)
+    state.logs.append("Agent memory context:\n" + memory_context(instruction))
     snap(state, "autonomous stream start")
     remember(state)
     yield sse({"kind": "auto", "title": "Autonomous mode started", "detail": instruction, "status": state.status})
@@ -308,6 +364,7 @@ def autonomous_stream_events(state: BuildState, instruction: str, max_rounds: in
         if repeated >= 1:
             state.status = "invalid"
             state.logs.append("Autonomous stream paused: same error repeated. Add steering instruction and run again.")
+            learn_from_errors(state, [signature], category="autonomous_repeated_error")
             remember(state)
             yield sse({"kind": "pause", "title": "Paused", "detail": "Same error repeated. Add steering instruction and run again.", "status": state.status, "done": True})
             return
@@ -329,11 +386,21 @@ def agents_factory(req: AgentRunRequest):
     agent = get_or_create_specialist(req.goal)
     return agent
 
+@app.get("/agent-memory")
+def agent_memory_list(query: str | None = None, category: str | None = None, tag: str | None = None, limit: int = 100):
+    records = search_memory(query, limit=limit) if query else list_memory(category=category, tag=tag, limit=limit)
+    return {"memory": [dump_model(record) for record in records]}
+
+@app.post("/agent-memory")
+def agent_memory_create(req: MemoryCreateRequest):
+    return create_memory(req)
+
 @app.post("/projects")
 def create_project(req: BuildRequest) -> BuildState:
     spec = build_spec(req.idea, req.stack)
     files = {path: FileSpec(path=path, purpose=purpose) for path, purpose in spec.files.items()}
     state = BuildState(project_id=str(uuid4()), use_ai=req.use_ai, spec=spec, files=files, logs=["Spec locked", f"AI generation: {'on' if req.use_ai else 'off'}"])
+    state.logs.append("Agent memory context:\n" + memory_context(req.idea))
     remember(state); snap(state, "001 created spec")
     specialist = get_or_create_specialist(req.idea)
     remember_agent_result(specialist, state.project_id, f"Created project from idea: {req.idea}")
@@ -352,6 +419,7 @@ def change_project(project_id: str, req: ChangeRequest) -> BuildState:
         if path not in state.files:
             state.files[path] = FileSpec(path=path, purpose=purpose)
     state.status = "planned"; state.logs.append(f"Instruction applied: {req.instruction}")
+    state.logs.append("Agent memory context:\n" + memory_context(req.instruction))
     specialist = get_or_create_specialist(req.instruction)
     remember_agent_result(specialist, state.project_id, f"Instruction applied: {req.instruction}")
     state.logs.append(f"Agent assigned: {specialist.name}")
@@ -444,7 +512,10 @@ def sandbox_fix(project_id: str, req: SandboxFixRequest):
     state = get_project(project_id); snap(state, "before sandbox fix")
     info = sandbox_status(project_id); recent = sandbox_logs(project_id, limit=120).get("logs", [])
     state.logs.append("Sandbox AI fix requested"); state.logs.append("User instruction: " + req.instruction)
-    if info.get("last_error"): state.logs.append("Sandbox last error: " + str(info.get("last_error"))[-2000:])
+    state.logs.append("Agent memory context:\n" + memory_context(req.instruction + " " + str(info.get("last_error") or "")))
+    if info.get("last_error"):
+        state.logs.append("Sandbox last error: " + str(info.get("last_error"))[-2000:])
+        learn_from_errors(state, [str(info.get("last_error"))], category="sandbox_failure")
     if recent: state.logs.append("Sandbox recent logs:\n" + "\n".join(recent[-40:]))
     agent = get_or_create_specialist(req.instruction + " dependency build repair")
     remember_agent_result(agent, state.project_id, f"Sandbox fix requested: {req.instruction}")
