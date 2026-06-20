@@ -154,6 +154,44 @@ def project_graph(state: BuildState) -> dict:
     return {"project_id": state.project_id, "nodes": nodes, "edges": edges}
 
 
+def timeline_for(state: BuildState) -> dict:
+    events = []
+    for item in list_snapshots(state.project_id):
+        events.append({
+            "kind": "snapshot",
+            "title": "Snapshot saved",
+            "detail": f"{item.get('snapshot_id')} — {item.get('label')}",
+            "status": item.get("status"),
+            "created_at": item.get("created_at"),
+        })
+    base = 0.0
+    for index, line in enumerate(state.logs[-160:]):
+        lower = line.lower()
+        kind = "log"
+        title = "Log"
+        if "spec locked" in lower:
+            kind, title = "plan", "Blueprint/spec locked"
+        elif line.startswith("Accepted "):
+            kind, title = "file", "File accepted"
+        elif line.startswith("Rejected "):
+            kind, title = "error", "File rejected"
+        elif "sandbox" in lower and "fix" in lower:
+            kind, title = "repair", "Sandbox repair"
+        elif "real build repair" in lower:
+            kind, title = "repair", "Real build repair"
+        elif "build" in lower and "failed" in lower:
+            kind, title = "error", "Build failed"
+        elif "project valid" in lower or "build passed" in lower:
+            kind, title = "success", "Build passed"
+        elif "snapshot" in lower:
+            kind, title = "snapshot", "Snapshot"
+        elif "instruction" in lower:
+            kind, title = "instruction", "User instruction"
+        events.append({"kind": kind, "title": title, "detail": line, "created_at": base + index})
+    events.sort(key=lambda event: event.get("created_at") or 0)
+    return {"project_id": state.project_id, "events": events[-220:]}
+
+
 @app.post("/projects")
 def create_project(req: BuildRequest) -> BuildState:
     spec = build_spec(req.idea, req.stack)
@@ -241,6 +279,11 @@ def validate_project(project_id: str) -> BuildState:
 @app.get("/projects/{project_id}/graph")
 def get_graph(project_id: str):
     return project_graph(get_project(project_id))
+
+
+@app.get("/projects/{project_id}/timeline")
+def get_timeline(project_id: str):
+    return timeline_for(get_project(project_id))
 
 
 @app.post("/projects/{project_id}/snapshot")
