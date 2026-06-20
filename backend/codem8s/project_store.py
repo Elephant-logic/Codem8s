@@ -33,15 +33,7 @@ def _dump_model(model) -> dict:
     return json.loads(model.json())
 
 
-def save_project(state: BuildState) -> None:
-    data = _dump_model(state)
-    _path(state.project_id).write_text(json.dumps(data, indent=2), encoding='utf-8')
-
-
-def load_project(project_id: str) -> BuildState | None:
-    path = _path(project_id)
-    if not path.exists():
-        return None
+def _load_path(path: Path) -> BuildState | None:
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
         if hasattr(BuildState, 'model_validate'):
@@ -51,16 +43,34 @@ def load_project(project_id: str) -> BuildState | None:
         return None
 
 
+def save_project(state: BuildState) -> None:
+    data = _dump_model(state)
+    _path(state.project_id).write_text(json.dumps(data, indent=2), encoding='utf-8')
+
+
+def load_latest_project() -> BuildState | None:
+    files = sorted(store_dir().glob('*.json'), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in files:
+        state = _load_path(path)
+        if state:
+            state.logs.append('Recovered latest saved project after stale project id')
+            return state
+    return None
+
+
+def load_project(project_id: str) -> BuildState | None:
+    path = _path(project_id)
+    if path.exists():
+        return _load_path(path)
+    # Browser state can survive a Render redeploy while the in-memory PROJECTS map is gone.
+    # Instead of leaving buttons dead with "Project not found", recover the newest saved project.
+    return load_latest_project()
+
+
 def load_all_projects() -> Dict[str, BuildState]:
     projects: Dict[str, BuildState] = {}
     for path in store_dir().glob('*.json'):
-        try:
-            data = json.loads(path.read_text(encoding='utf-8'))
-            if hasattr(BuildState, 'model_validate'):
-                state = BuildState.model_validate(data)
-            else:
-                state = BuildState.parse_obj(data)
+        state = _load_path(path)
+        if state:
             projects[state.project_id] = state
-        except Exception:
-            continue
     return projects
