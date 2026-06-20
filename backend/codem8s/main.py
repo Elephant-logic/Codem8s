@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -17,6 +18,7 @@ from .project_store import load_all_projects, load_project, save_project
 from .snapshot_store import create_snapshot, list_snapshots, restore_snapshot
 from .agent_registry import AgentCreateRequest, AgentRunRequest, create_agent, find_agent, get_or_create_specialist, list_agents, remember_agent_result
 from .agent_memory import MemoryCreateRequest, create_memory, list_memory, search_memory
+from .agent_team import TeamRunRequest, create_team_run, finish_step, get_team_run, list_team_runs, save_team_run
 
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -75,16 +77,7 @@ def learn_from_errors(state: BuildState, errors: list[str], category: str = "bui
         if "dashboard" in low or "shallow" in low:
             tags += ["dashboard", "quality"]
         try:
-            create_memory(MemoryCreateRequest(
-                project_id=state.project_id,
-                category=category,
-                pattern=text.split("\n", 1)[0][:180],
-                symptom=text,
-                fix="Search agent memory, repair the connected dependency chain, then rerun validation/build.",
-                lesson=f"Observed in {state.spec.app_name}: {text}",
-                tags=sorted(set(tags)),
-                success=False,
-            ))
+            create_memory(MemoryCreateRequest(project_id=state.project_id, category=category, pattern=text.split("\n", 1)[0][:180], symptom=text, fix="Search agent memory, repair the connected dependency chain, then rerun validation/build.", lesson=f"Observed in {state.spec.app_name}: {text}", tags=sorted(set(tags)), success=False))
         except Exception as exc:
             state.logs.append(f"Agent memory skipped: {exc}")
 
@@ -229,6 +222,38 @@ def run_agent_on_state(state: BuildState, req: AgentRunRequest) -> dict:
     return {"agent": dump_model(agent), "project": state, "timeline": timeline_for(state)}
 
 
+def run_agent_team(state: BuildState, req: TeamRunRequest) -> dict:
+    run = create_team_run(state.project_id, req.goal)
+    state.logs.append(f"Agent team started: {run.team_run_id}")
+    state.logs.append("Agent team goal: " + req.goal)
+    handoff_text = req.goal
+    snap(state, "agent team start")
+    for cycle in range(max(1, min(req.max_cycles or 1, 3))):
+        for step in run.steps:
+            step.status = "running"
+            step.started_at = time.time()
+            step_goal = f"{req.goal}\nPrevious handoff:\n{handoff_text}\nStep goal:\n{step.goal_template}"
+            state.logs.append(f"Team step started: {step.name}")
+            result = run_agent_on_state(state, AgentRunRequest(goal=step_goal, skill=step.skill))
+            project = result.get("project")
+            if project:
+                state = project
+            summary = state.logs[-1] if state.logs else f"{step.name} completed"
+            actions = [line for line in state.logs[-10:] if any(token in line.lower() for token in ["accepted", "rejected", "repair", "valid", "invalid", "agent"])]
+            handoff_text = f"{step.name}: {summary}"
+            run.handoffs.append({"agent": step.name, "cycle": cycle + 1, "summary": summary, "actions": actions[-6:], "handoff": handoff_text})
+            finish_step(step, "complete", summary, actions[-6:], handoff_text, 0.82 if state.status != "invalid" else 0.55)
+            save_team_run(run)
+            remember(state)
+    run.status = "complete" if state.status == "valid" else "needs_attention"
+    save_team_run(run)
+    state.logs.append(f"Agent team finished: {run.status}")
+    create_memory(MemoryCreateRequest(project_id=state.project_id, category="agent_team", pattern=f"team run {run.status}", lesson=json.dumps(run.handoffs[-8:], default=str), tags=["team", "handoff"], success=(state.status == "valid")))
+    snap(state, "agent team finish")
+    remember(state)
+    return {"team_run": dump_model(run), "project": state, "timeline": timeline_for(state)}
+
+
 def project_graph(state: BuildState) -> dict:
     topology = {}
     for entry in reversed(state.spec.change_log):
@@ -256,6 +281,7 @@ def timeline_for(state: BuildState) -> dict:
         if "spec locked" in lower: kind, title = "plan", "Blueprint/spec locked"
         elif line.startswith("Accepted "): kind, title = "file", "File accepted"
         elif line.startswith("Rejected "): kind, title = "error", "File rejected"
+        elif "agent team" in lower or "team step" in lower: kind, title = "team", "Agent team"
         elif "agent memory" in lower: kind, title = "memory", "Agent memory"
         elif "agent" in lower: kind, title = "agent", "Agent activity"
         elif "autonomous" in lower: kind, title = "auto", "Autonomous mode"
@@ -287,8 +313,7 @@ def autonomous_run(state: BuildState, req: AutonomousRequest) -> dict:
     state.logs.append("Instruction: " + req.instruction)
     snap(state, "autonomous start")
     result = {"build_ok": False, "last_error": "not run"}
-    last_error = ""
-    repeated = 0
+    last_error = ""; repeated = 0
     for round_no in range(1, max_rounds + 1):
         state.logs.append(f"Autonomous round {round_no}: generate missing files")
         fill_missing_files(state, limit=80)
@@ -332,8 +357,7 @@ def autonomous_stream_events(state: BuildState, instruction: str, max_rounds: in
     snap(state, "autonomous stream start")
     remember(state)
     yield sse({"kind": "auto", "title": "Autonomous mode started", "detail": instruction, "status": state.status})
-    last_error = ""
-    repeated = 0
+    last_error = ""; repeated = 0
     for round_no in range(1, max_rounds + 1):
         yield sse({"kind": "auto", "title": f"Round {round_no}", "detail": "Generating missing files", "status": state.status})
         fill_missing_files(state, limit=80)
@@ -374,17 +398,13 @@ def autonomous_stream_events(state: BuildState, instruction: str, max_rounds: in
     yield sse({"kind": "pause", "title": "Paused", "detail": "Round limit reached. Add steering instruction and run again.", "status": state.status, "done": True})
 
 @app.get("/agents")
-def agents_list():
-    return {"agents": [dump_model(agent) for agent in list_agents()]}
+def agents_list(): return {"agents": [dump_model(agent) for agent in list_agents()]}
 
 @app.post("/agents")
-def agents_create(req: AgentCreateRequest):
-    return create_agent(req)
+def agents_create(req: AgentCreateRequest): return create_agent(req)
 
 @app.post("/agents/factory")
-def agents_factory(req: AgentRunRequest):
-    agent = get_or_create_specialist(req.goal)
-    return agent
+def agents_factory(req: AgentRunRequest): return get_or_create_specialist(req.goal)
 
 @app.get("/agent-memory")
 def agent_memory_list(query: str | None = None, category: str | None = None, tag: str | None = None, limit: int = 100):
@@ -392,8 +412,21 @@ def agent_memory_list(query: str | None = None, category: str | None = None, tag
     return {"memory": [dump_model(record) for record in records]}
 
 @app.post("/agent-memory")
-def agent_memory_create(req: MemoryCreateRequest):
-    return create_memory(req)
+def agent_memory_create(req: MemoryCreateRequest): return create_memory(req)
+
+@app.get("/team-runs/{team_run_id}")
+def team_run_get(team_run_id: str):
+    run = get_team_run(team_run_id)
+    if not run: raise HTTPException(404, "Team run not found")
+    return run
+
+@app.get("/projects/{project_id}/team/runs")
+def project_team_runs(project_id: str, limit: int = 50):
+    return {"project_id": project_id, "team_runs": [dump_model(run) for run in list_team_runs(project_id, limit=limit)]}
+
+@app.post("/projects/{project_id}/team/run")
+def project_team_run(project_id: str, req: TeamRunRequest):
+    return run_agent_team(get_project(project_id), req)
 
 @app.post("/projects")
 def create_project(req: BuildRequest) -> BuildState:
@@ -408,8 +441,7 @@ def create_project(req: BuildRequest) -> BuildState:
     return remember(state)
 
 @app.post("/projects/{project_id}/agents/run")
-def project_agent_run(project_id: str, req: AgentRunRequest):
-    return run_agent_on_state(get_project(project_id), req)
+def project_agent_run(project_id: str, req: AgentRunRequest): return run_agent_on_state(get_project(project_id), req)
 
 @app.post("/projects/{project_id}/change")
 def change_project(project_id: str, req: ChangeRequest) -> BuildState:
@@ -462,8 +494,7 @@ def validate_project(project_id: str) -> BuildState:
 
 @app.post("/projects/{project_id}/autonomous")
 def autonomous_project(project_id: str, req: AutonomousRequest):
-    state = get_project(project_id)
-    result = autonomous_run(state, req)
+    state = get_project(project_id); result = autonomous_run(state, req)
     return {"project": remember(state), "sandbox": result, "timeline": timeline_for(state)}
 
 @app.get("/projects/{project_id}/autonomous/stream")
