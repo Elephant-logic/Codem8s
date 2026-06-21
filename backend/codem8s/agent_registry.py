@@ -112,8 +112,9 @@ def default_prompt(name: str, role: str, skills: list[str]) -> str:
     skill_text = ', '.join(skills) or role
     return (
         f'You are {name}, a Codem8s specialist agent. Role: {role}. '
-        f'Skills: {skill_text}. Work from the saved blueprint, dependency topology, sandbox logs, and validator output. '
-        'Do not make isolated changes. Fix connected files as a graph. Prefer coherent product quality over file count.'
+        f'Skills: {skill_text}. Work from the saved blueprint, dependency topology, sandbox logs, validator output, and agent memory. '
+        'Do not make isolated changes. Fix connected files as a graph. Prefer coherent product quality over file count. '
+        'Write lessons back to memory so future projects avoid repeated mistakes.'
     )
 
 
@@ -130,26 +131,40 @@ def default_checklist(role: str, skills: list[str]) -> list[str]:
         base.extend(['Use responsive layout', 'Use premium design system', 'Check empty/loading/error states'])
     if 'test' in role_low or 'validator' in role_low:
         base.extend(['Run real build mentally or through sandbox', 'Report exact failing chain'])
-    if 'repair' in role_low:
+    if 'repair' in role_low or 'dependency' in role_low:
         base.extend(['Repair all files in the failing dependency chain', 'Do not stop after first error'])
-    if 'architect' in role_low:
+    if 'architect' in role_low or 'product' in role_low:
         base.extend(['Define data model, user flows, navigation, and acceptance criteria first'])
+    if 'game' in role_low:
+        base.extend(['Keep game loop, state, systems, entities, UI and canvas imports consistent', 'Make the game playable, not just renderable'])
+    if 'crm' in role_low or 'saas' in role_low:
+        base.extend(['Include realistic workflows, permissions, records, dashboards and activity history'])
     return base
 
 
-def seed_default_agents() -> None:
-    if any(agent_dir().glob('*.json')):
-        return
-    defaults = [
-        AgentCreateRequest(name='Architect Agent', role='Plans product, data model, screens, topology, user flows, and acceptance criteria', skills=['planning', 'topology', 'data-model']),
+def _default_agent_requests() -> list[AgentCreateRequest]:
+    return [
+        AgentCreateRequest(name='Architect Agent', role='Plans product, data model, screens, topology, user flows, and acceptance criteria', skills=['planning', 'topology', 'data-model', 'product']),
         AgentCreateRequest(name='Builder Agent', role='Generates files from the product plan and topology', skills=['code-generation', 'react', 'fastapi']),
         AgentCreateRequest(name='Validator Agent', role='Checks imports, exports, missing files, package deps, and product depth', skills=['validation', 'static-analysis', 'quality-gates']),
         AgentCreateRequest(name='Repair Agent', role='Fixes connected files from build and sandbox errors', skills=['repair', 'dependency-graph', 'vite-errors']),
         AgentCreateRequest(name='Designer Agent', role='Improves UI, UX, CSS, layout, visual hierarchy, and responsive design', skills=['ui', 'ux', 'css', 'design-system']),
         AgentCreateRequest(name='Tester Agent', role='Runs sandbox/build reasoning and reports failures with likely causes', skills=['testing', 'sandbox', 'build-logs']),
+        AgentCreateRequest(name='Dependency Graph Agent', role='Validates and repairs import paths, named/default exports, missing files, and graph-connected breakages', skills=['dependency', 'imports', 'exports', 'vite', 'graph', 'repair']),
+        AgentCreateRequest(name='Quality Agent', role='Scores product architecture, UI depth, workflow depth, data richness, and design system quality', skills=['quality', 'product-quality', 'ui-depth', 'workflow-depth']),
+        AgentCreateRequest(name='Product Architect Agent', role='Turns ideas into real product architecture with personas, workflows, permissions, reports, automations, and acceptance criteria', skills=['product', 'architect', 'workflows', 'acceptance-criteria']),
+        AgentCreateRequest(name='Game Agent', role='Specialist for game architecture, loops, entities, systems, canvas scenes, balancing, HUD, and playable mechanics', skills=['game', 'canvas', 'game-loop', 'entities', 'systems', 'balancing']),
+        AgentCreateRequest(name='SaaS Agent', role='Specialist for SaaS dashboards, CRUD workflows, teams, permissions, billing-style UX, and admin panels', skills=['saas', 'dashboard', 'crud', 'permissions', 'teams']),
+        AgentCreateRequest(name='CRM Agent', role='Specialist for CRM accounts, contacts, leads, pipelines, deals, activities, notes, reports, and sales workflows', skills=['crm', 'pipeline', 'sales', 'contacts', 'activity-history']),
+        AgentCreateRequest(name='Data Model Agent', role='Specialist for coherent sample data, app plans, entity contracts, relationships, and derived metrics', skills=['data', 'sample-data', 'entities', 'contracts', 'metrics']),
     ]
-    for req in defaults:
-        create_agent(req)
+
+
+def seed_default_agents() -> None:
+    existing_names = {agent.name for agent in [a for a in (_load(p) for p in agent_dir().glob('*.json')) if a]}
+    for req in _default_agent_requests():
+        if req.name not in existing_names:
+            create_agent(req)
 
 
 def find_agent(skill: str | None = None, agent_id: str | None = None) -> AgentSpec | None:
@@ -168,25 +183,58 @@ def find_agent(skill: str | None = None, agent_id: str | None = None) -> AgentSp
 
 def infer_specialist_name(goal: str) -> tuple[str, str, list[str]]:
     low = goal.lower()
-    if any(term in low for term in ['crm', 'lead', 'pipeline', 'sales']):
-        return 'CRM Domain Agent', 'Specialist for CRM entities, sales pipelines, accounts, contacts, opportunities, and activity history', ['crm', 'pipeline', 'domain-model']
-    if any(term in low for term in ['game', 'tower', 'wave', 'enemy', 'canvas']):
-        return 'Game Systems Agent', 'Specialist for game loops, entities, systems, balancing, HUD, and playable scenes', ['game', 'canvas', 'systems']
+    if any(term in low for term in ['tower', 'wave', 'enemy', 'canvas', 'game', 'projectile', 'hud', 'level', 'sprite']):
+        return 'Game Agent', 'Specialist for game architecture, loops, entities, systems, canvas scenes, balancing, HUD, and playable mechanics', ['game', 'canvas', 'game-loop', 'entities', 'systems', 'balancing']
+    if any(term in low for term in ['crm', 'lead', 'pipeline', 'sales', 'deal', 'account', 'contact']):
+        return 'CRM Agent', 'Specialist for CRM accounts, contacts, leads, pipelines, deals, activities, notes, reports, and sales workflows', ['crm', 'pipeline', 'sales', 'contacts', 'activity-history']
+    if any(term in low for term in ['saas', 'admin', 'dashboard', 'team', 'permission', 'settings', 'workspace']):
+        return 'SaaS Agent', 'Specialist for SaaS dashboards, CRUD workflows, teams, permissions, and admin panels', ['saas', 'dashboard', 'crud', 'permissions', 'teams']
     if any(term in low for term in ['export', 'zip', 'github', 'save', 'snapshot']):
         return 'Persistence Agent', 'Specialist for saving, exporting, restoring, project state, and snapshots', ['persistence', 'snapshots', 'export']
-    if any(term in low for term in ['import', 'export', 'missing', 'vite', 'build', 'dependency']):
-        return 'Dependency Graph Agent', 'Specialist for import/export graphs, package dependencies, Vite build errors, and connected repair', ['imports', 'exports', 'vite', 'repair']
-    if any(term in low for term in ['design', 'layout', 'ui', 'dashboard', 'responsive']):
-        return 'Product Design Agent', 'Specialist for polished SaaS UI, dashboards, interaction states, and responsive design systems', ['ui', 'ux', 'dashboard', 'css']
+    if any(term in low for term in ['import', 'export', 'missing', 'vite', 'build', 'dependency', 'module not found', 'unresolved_import']):
+        return 'Dependency Graph Agent', 'Specialist for import/export graphs, package dependencies, Vite build errors, and connected repair', ['dependency', 'imports', 'exports', 'vite', 'repair']
+    if any(term in low for term in ['design', 'layout', 'ui', 'responsive', 'visual', 'css']):
+        return 'Designer Agent', 'Specialist for polished UI, dashboards, interaction states, and responsive design systems', ['ui', 'ux', 'dashboard', 'css']
+    if any(term in low for term in ['quality', 'shallow', 'workflow', 'product', 'architecture']):
+        return 'Quality Agent', 'Specialist for product quality scoring, depth checks, and acceptance criteria', ['quality', 'product-quality', 'ui-depth', 'workflow-depth']
     return 'Project Specialist Agent', 'Specialist created for this project request', ['project-specialist']
 
 
 def get_or_create_specialist(goal: str) -> AgentSpec:
     name, role, skills = infer_specialist_name(goal)
-    existing = find_agent(skill=skills[0])
-    if existing and existing.name == name:
-        return existing
+    for agent in list_agents():
+        if agent.name == name:
+            return agent
     return create_agent(AgentCreateRequest(name=name, role=role, skills=skills))
+
+
+def select_agent_team(goal: str) -> list[AgentSpec]:
+    """Return a domain-aware agent pack for a project or error goal."""
+    low = goal.lower()
+    wanted = ['Product Architect Agent', 'Dependency Graph Agent', 'Builder Agent', 'Validator Agent', 'Repair Agent', 'Tester Agent', 'Quality Agent']
+    if any(term in low for term in ['tower', 'wave', 'enemy', 'canvas', 'game', 'projectile', 'hud', 'sprite']):
+        wanted.insert(1, 'Game Agent')
+        wanted.append('Designer Agent')
+    elif any(term in low for term in ['crm', 'lead', 'pipeline', 'sales', 'deal', 'account', 'contact']):
+        wanted.insert(1, 'CRM Agent')
+        wanted.insert(2, 'Data Model Agent')
+        wanted.append('Designer Agent')
+    elif any(term in low for term in ['saas', 'dashboard', 'admin', 'workspace', 'permission', 'team']):
+        wanted.insert(1, 'SaaS Agent')
+        wanted.insert(2, 'Data Model Agent')
+        wanted.append('Designer Agent')
+    elif any(term in low for term in ['data', 'sample', 'model', 'contract', 'entity']):
+        wanted.insert(1, 'Data Model Agent')
+    elif any(term in low for term in ['design', 'ui', 'layout', 'css']):
+        wanted.insert(1, 'Designer Agent')
+    agents = list_agents()
+    by_name = {agent.name: agent for agent in agents}
+    team: list[AgentSpec] = []
+    for name in wanted:
+        agent = by_name.get(name)
+        if agent and agent.agent_id not in {a.agent_id for a in team}:
+            team.append(agent)
+    return team
 
 
 def remember_agent_result(agent: AgentSpec, project_id: str, memory: str, success: bool | None = None) -> AgentSpec:
