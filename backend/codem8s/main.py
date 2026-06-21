@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from .agent_build_repair import real_build_repair_project
 from .agent_memory import MemoryCreateRequest, create_memory, list_memory, search_memory
 from .agent_project_repair import repair_project
-from .agent_registry import AgentCreateRequest, AgentRunRequest, create_agent, find_agent, get_or_create_specialist, list_agents, remember_agent_result
+from .agent_registry import AgentCreateRequest, AgentRunRequest, create_agent, find_agent, get_or_create_specialist, list_agents, remember_agent_result, select_agent_team
 from .agent_team import TeamRunRequest, create_team_run, finish_step, get_team_run, list_team_runs, save_team_run
 from .consistency_repair import deterministic_consistency_repair
 from .exporter import export_project
@@ -285,6 +285,10 @@ def run_agent_on_state(state: BuildState, req: AgentRunRequest) -> dict:
     elif any(term in role_text for term in ["architect", "plan", "topology", "product"]):
         state.logs.append("Product Architect reviewed blueprint, topology, workflows, data, and acceptance criteria")
         state.logs.append("Product Architect guidance:\n" + quality_repair_prompt(score_product_quality(current_contents(state))))
+    elif any(term in role_text for term in ["game", "canvas", "loop", "entity", "systems"]):
+        state.logs.append("Game Agent reviewed game loop, systems, entities, HUD, balancing, and playable scene structure")
+        repair_whole_project(state)
+        success = mark_validity(state, real_build_check_and_repair(state, rounds=4))
     elif any(term in role_text for term in ["design", "ui", "ux", "dashboard", "css"]):
         repair_whole_project(state)
         success = product_quality_check(state)
@@ -299,8 +303,11 @@ def run_agent_on_state(state: BuildState, req: AgentRunRequest) -> dict:
 
 
 def run_agent_team(state: BuildState, req: TeamRunRequest) -> dict:
-    run = create_team_run(state.project_id, req.goal)
+    team_goal = f"{state.spec.app_name}\n{state.spec.goal}\n{req.goal}"
+    selected_agents = select_agent_team(team_goal)
+    run = create_team_run(state.project_id, req.goal, agents=selected_agents)
     state.logs.append(f"Agent team started: {run.team_run_id}")
+    state.logs.append("Selected agents: " + ", ".join(agent.name for agent in selected_agents))
     state.logs.append("Agent team goal: " + req.goal)
     handoff_text = req.goal
     snap(state, "agent team start")
@@ -308,23 +315,23 @@ def run_agent_team(state: BuildState, req: TeamRunRequest) -> dict:
         for step in run.steps:
             step.status = "running"
             step.started_at = time.time()
-            step_goal = f"{req.goal}\nPrevious handoff:\n{handoff_text}\nStep goal:\n{step.goal_template}"
+            step_goal = f"{team_goal}\nPrevious handoff:\n{handoff_text}\nStep goal:\n{step.goal_template}"
             state.logs.append(f"Team step started: {step.name}")
             result = run_agent_on_state(state, AgentRunRequest(goal=step_goal, skill=step.skill))
             project = result.get("project")
             if project:
                 state = project
             summary = state.logs[-1] if state.logs else f"{step.name} completed"
-            actions = [line for line in state.logs[-10:] if any(token in line.lower() for token in ["accepted", "rejected", "repair", "valid", "invalid", "agent", "quality"])]
+            actions = [line for line in state.logs[-12:] if any(token in line.lower() for token in ["accepted", "rejected", "repair", "valid", "invalid", "agent", "quality", "deterministic"])]
             handoff_text = f"{step.name}: {summary}"
-            run.handoffs.append({"agent": step.name, "cycle": cycle + 1, "summary": summary, "actions": actions[-6:], "handoff": handoff_text})
-            finish_step(step, "complete", summary, actions[-6:], handoff_text, 0.82 if state.status != "invalid" else 0.55)
+            run.handoffs.append({"agent": step.name, "cycle": cycle + 1, "summary": summary, "actions": actions[-7:], "handoff": handoff_text})
+            finish_step(step, "complete", summary, actions[-7:], handoff_text, 0.84 if state.status != "invalid" else 0.55)
             save_team_run(run)
             remember(state)
     run.status = "complete" if state.status == "valid" else "needs_attention"
     save_team_run(run)
     state.logs.append(f"Agent team finished: {run.status}")
-    create_memory(MemoryCreateRequest(project_id=state.project_id, category="agent_team", pattern=f"team run {run.status}", lesson=json.dumps(run.handoffs[-8:], default=str), tags=["team", "handoff"], success=(state.status == "valid")))
+    create_memory(MemoryCreateRequest(project_id=state.project_id, category="agent_team", pattern=f"team run {run.status}", lesson=json.dumps(run.handoffs[-10:], default=str), tags=["team", "handoff", *[a.skills[0] for a in selected_agents if a.skills]], success=(state.status == "valid")))
     snap(state, "agent team finish")
     remember(state)
     return {"team_run": dump_model(run), "project": state, "timeline": timeline_for(state)}
@@ -355,10 +362,10 @@ def timeline_for(state: BuildState) -> dict:
     for index, line in enumerate(state.logs[-180:]):
         lower = line.lower(); kind = "log"; title = "Log"
         if "product quality" in lower: kind, title = "quality", "Product quality"
+        elif "selected agents" in lower or "agent team" in lower or "team step" in lower: kind, title = "team", "Agent team"
         elif "spec locked" in lower: kind, title = "plan", "Blueprint/spec locked"
         elif line.startswith("Accepted "): kind, title = "file", "File accepted"
         elif line.startswith("Rejected "): kind, title = "error", "File rejected"
-        elif "agent team" in lower or "team step" in lower: kind, title = "team", "Agent team"
         elif "agent memory" in lower: kind, title = "memory", "Agent memory"
         elif "agent" in lower: kind, title = "agent", "Agent activity"
         elif "deterministic consistency" in lower: kind, title = "repair", "Consistency repair"
@@ -461,6 +468,8 @@ def create_project(req: BuildRequest) -> BuildState:
     files = {path: FileSpec(path=path, purpose=purpose) for path, purpose in spec.files.items()}
     state = BuildState(project_id=str(uuid4()), use_ai=req.use_ai, spec=spec, files=files, logs=["Spec locked", f"AI generation: {'on' if req.use_ai else 'off'}"])
     state.logs.append("Agent memory context:\n" + memory_context(req.idea))
+    selected = select_agent_team(req.idea)
+    state.logs.append("Selected agents: " + ", ".join(agent.name for agent in selected))
     remember(state); snap(state, "001 created spec")
     specialist = get_or_create_specialist(req.idea)
     remember_agent_result(specialist, state.project_id, f"Created project from idea: {req.idea}")
@@ -480,6 +489,8 @@ def change_project(project_id: str, req: ChangeRequest) -> BuildState:
     state.status = "planned"
     state.logs.append(f"Instruction applied: {req.instruction}")
     state.logs.append("Agent memory context:\n" + memory_context(req.instruction))
+    selected = select_agent_team(req.instruction)
+    state.logs.append("Selected agents: " + ", ".join(agent.name for agent in selected))
     specialist = get_or_create_specialist(req.instruction)
     remember_agent_result(specialist, state.project_id, f"Instruction applied: {req.instruction}")
     state.logs.append(f"Agent assigned: {specialist.name}")
@@ -571,6 +582,7 @@ def sandbox_fix(project_id: str, req: SandboxFixRequest):
     info = sandbox_status(project_id); recent = sandbox_logs(project_id, limit=120).get("logs", [])
     state.logs.append("Sandbox AI fix requested"); state.logs.append("User instruction: " + req.instruction)
     state.logs.append("Agent memory context:\n" + memory_context(req.instruction + " " + str(info.get("last_error") or "")))
+    state.logs.append("Selected agents: " + ", ".join(agent.name for agent in select_agent_team(req.instruction + " " + str(info.get("last_error") or ""))))
     if info.get("last_error"):
         state.logs.append("Sandbox last error: " + str(info.get("last_error"))[-2000:])
         learn_from_errors(state, [str(info.get("last_error"))], category="sandbox_failure")
