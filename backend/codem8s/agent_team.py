@@ -96,49 +96,64 @@ def get_team_run(team_run_id: str) -> TeamRun | None:
     return _load(path) if path.exists() else None
 
 
+def _skill_from_agent(agent) -> str:
+    skills = getattr(agent, 'skills', []) or []
+    priority = ['game', 'crm', 'saas', 'data', 'quality', 'dependency', 'builder', 'validator', 'repair', 'testing', 'ui', 'product']
+    for item in priority:
+        for skill in skills:
+            if item in skill:
+                return skill
+    return skills[0] if skills else getattr(agent, 'name', 'agent').lower().replace(' ', '-')
+
+
+def step_from_agent(agent) -> TeamStep:
+    name = getattr(agent, 'name', 'Agent')
+    role = getattr(agent, 'role', 'Specialist agent')
+    skills = getattr(agent, 'skills', []) or []
+    skill = _skill_from_agent(agent)
+    low = ' '.join([name, role, *skills]).lower()
+    if 'game' in low:
+        goal = 'Ensure game architecture is playable: loop, state, entities, systems, canvas, HUD, balancing, and import paths.'
+    elif 'crm' in low:
+        goal = 'Ensure CRM product depth: accounts, contacts, leads, pipeline, activities, notes, reports, and realistic workflows.'
+    elif 'saas' in low:
+        goal = 'Ensure SaaS depth: dashboard, CRUD flows, permissions, teams, settings, admin states, and realistic data.'
+    elif 'data' in low:
+        goal = 'Ensure data contracts are coherent across app plan, sample data, UI, API client, and derived metrics.'
+    elif 'dependency' in low:
+        goal = 'Validate and repair every import path, exported symbol, missing file, and connected dependency chain.'
+    elif 'quality' in low:
+        goal = 'Score and improve product architecture, UI depth, workflow depth, data richness, and design system quality.'
+    elif 'design' in low or 'ui' in low:
+        goal = 'Improve responsive UI, visual hierarchy, dashboard sections, empty/loading/error states, and interaction polish.'
+    elif 'repair' in low:
+        goal = 'Repair connected files from build, sandbox, validation, and quality errors until the project is coherent.'
+    elif 'test' in low or 'validator' in low:
+        goal = 'Run validation/build reasoning and report exact failing chains with next repair actions.'
+    elif 'builder' in low or 'code' in low:
+        goal = 'Generate or complete files using the blueprint, topology, previous handoff, and memory.'
+    else:
+        goal = 'Review project coherence and leave useful handoff notes for the next agent.'
+    return TeamStep(name=name, role=role, skill=skill, goal_template=goal)
+
+
 def default_team_steps() -> list[TeamStep]:
-    return [
-        TeamStep(
-            name='Architect Agent',
-            role='Plans product model, data contracts, screens, topology, and acceptance criteria.',
-            skill='architect',
-            goal_template='Review blueprint, app plan, entities, topology, and identify missing coherence before building.',
-        ),
-        TeamStep(
-            name='Builder Agent',
-            role='Generates or completes missing files from the plan and previous handoff.',
-            skill='builder',
-            goal_template='Generate missing files and complete shallow files using the architect handoff and project plan.',
-        ),
-        TeamStep(
-            name='Validator Agent',
-            role='Checks import/export contracts, missing files, package dependencies, data-model consistency, and product depth.',
-            skill='validator',
-            goal_template='Validate project consistency and report exact failing chains for repair.',
-        ),
-        TeamStep(
-            name='Repair Agent',
-            role='Fixes connected dependency chains from validator and build output.',
-            skill='repair',
-            goal_template='Repair the connected graph: imports, exports, missing files, data contracts, and build failures.',
-        ),
-        TeamStep(
-            name='Tester Agent',
-            role='Runs sandbox/build validation and summarizes final failures or success.',
-            skill='tester',
-            goal_template='Run build/sandbox checks, verify status, and produce final handoff.',
-        ),
-        TeamStep(
-            name='Designer Agent',
-            role='Improves UI/UX, responsive layout, dashboard depth, and visual system.',
-            skill='design',
-            goal_template='Review and improve UI depth, design system, empty/loading/error states, and dashboard quality.',
-        ),
+    # Fallback only. Normal project runs should use create_team_run(..., agents=selected_agents).
+    fallback = [
+        ('Product Architect Agent', 'Plans product model, data contracts, screens, topology, and acceptance criteria.', 'product'),
+        ('Dependency Graph Agent', 'Validates imports, exports, missing files, and dependency graph breakages.', 'dependency'),
+        ('Builder Agent', 'Generates or completes missing files from the plan and previous handoff.', 'builder'),
+        ('Validator Agent', 'Checks import/export contracts, data consistency, product depth, and build readiness.', 'validator'),
+        ('Repair Agent', 'Fixes connected dependency chains from validator and build output.', 'repair'),
+        ('Tester Agent', 'Runs sandbox/build validation and summarizes final failures or success.', 'testing'),
+        ('Quality Agent', 'Scores product architecture and product depth.', 'quality'),
     ]
+    return [TeamStep(name=n, role=r, skill=s, goal_template=f'{n}: {r}') for n, r, s in fallback]
 
 
-def create_team_run(project_id: str, goal: str) -> TeamRun:
-    run = TeamRun(project_id=project_id, goal=goal, steps=default_team_steps())
+def create_team_run(project_id: str, goal: str, agents: list[Any] | None = None) -> TeamRun:
+    steps = [step_from_agent(agent) for agent in agents] if agents else default_team_steps()
+    run = TeamRun(project_id=project_id, goal=goal, steps=steps)
     return save_team_run(run)
 
 
