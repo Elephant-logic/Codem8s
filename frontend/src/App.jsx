@@ -3,14 +3,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s.onrender.com';
 
 export default function App() {
-  const [idea, setIdea] = useState('Build a job tracking app with dashboard and notes');
+  const [idea, setIdea] = useState('Build a tower defense game with waves, enemies, towers, upgrades, HUD, canvas gameplay, and polished UI');
   const [change, setChange] = useState('');
   const [state, setState] = useState(null);
   const [busy, setBusy] = useState(false);
   const [sandboxBusy, setSandboxBusy] = useState(false);
   const [sandbox, setSandbox] = useState(null);
   const [sandboxLogLines, setSandboxLogLines] = useState([]);
-  const [sandboxInstruction, setSandboxInstruction] = useState('Use the blueprint, entry point, dependency topology, and command output to fix the current build error.');
+  const [sandboxInstruction, setSandboxInstruction] = useState('Use the selected specialist agents, dependency topology, agent memory, and command output to fix the current build or quality error.');
   const [graph, setGraph] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
   const [snapshots, setSnapshots] = useState([]);
@@ -21,8 +21,13 @@ export default function App() {
   const [model, setModel] = useState('gpt-4o-mini');
   const [useAi, setUseAi] = useState(true);
   const [error, setError] = useState('');
+  const [agents, setAgents] = useState([]);
+  const [teamRuns, setTeamRuns] = useState([]);
+  const [memory, setMemory] = useState([]);
+  const [quality, setQuality] = useState(null);
+  const [teamGoal, setTeamGoal] = useState('Work as a specialist team until this project is coherent, buildable, product-quality, and exportable.');
 
-  useEffect(() => { loadSettings(); }, []);
+  useEffect(() => { loadSettings(); refreshAgents(); refreshMemory(); }, []);
   useEffect(() => { if (state?.project_id) refreshProjectMeta(); }, [state?.project_id, state?.status]);
 
   const progress = useMemo(() => {
@@ -51,6 +56,8 @@ export default function App() {
     const file = state?.files?.[selectedNode.path];
     return { imports, dependents, file };
   }, [graph, selectedNode, state]);
+
+  const latestTeamRun = teamRuns[0];
 
   async function request(url, options = {}) {
     setError('');
@@ -86,11 +93,47 @@ export default function App() {
   }
 
   async function refreshProjectMeta() {
-    await Promise.all([refreshGraph(), refreshSnapshots(), refreshTimeline()]);
+    await Promise.all([refreshGraph(), refreshSnapshots(), refreshTimeline(), refreshTeamRuns(), refreshQuality(), refreshMemory()]);
+  }
+
+  async function refreshAgents() {
+    try { const data = await request('/agents'); setAgents(data.agents || []); }
+    catch (err) { setError(String(err.message || err)); }
+  }
+
+  async function refreshMemory(query = '') {
+    try {
+      const url = query ? `/agent-memory?query=${encodeURIComponent(query)}&limit=30` : '/agent-memory?limit=30';
+      const data = await request(url);
+      setMemory(data.memory || []);
+    } catch (err) { setError(String(err.message || err)); }
+  }
+
+  async function refreshTeamRuns() {
+    if (!state?.project_id) return;
+    try { const data = await request(`/projects/${state.project_id}/team/runs`); setTeamRuns(data.team_runs || []); }
+    catch (err) { setError(String(err.message || err)); }
+  }
+
+  async function refreshQuality() {
+    if (!state?.project_id) return;
+    try { const data = await request(`/projects/${state.project_id}/quality`); setQuality(data); }
+    catch (err) { setError(String(err.message || err)); }
+  }
+
+  async function runAgentTeam() {
+    if (!state) return;
+    setBusy(true); setSandboxBusy(true);
+    try {
+      const result = await request(`/projects/${state.project_id}/team/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goal: teamGoal, max_cycles: 1 }) });
+      if (result.project) setState(result.project);
+      await refreshProjectMeta();
+    } catch (err) { setError(String(err.message || err)); }
+    finally { setBusy(false); setSandboxBusy(false); }
   }
 
   async function createProject() {
-    setSandbox(null); setSandboxLogLines([]); setGraph(null); setSelectedNode(null); setSnapshots([]); setTimeline([]);
+    setSandbox(null); setSandboxLogLines([]); setGraph(null); setSelectedNode(null); setSnapshots([]); setTimeline([]); setTeamRuns([]); setQuality(null);
     const created = await post('/projects', { idea, use_ai: useAi });
     if (created) setTimeout(refreshProjectMeta, 300);
   }
@@ -286,12 +329,32 @@ export default function App() {
           <h2>Idea</h2>
           <textarea value={idea} onChange={(event) => setIdea(event.target.value)} />
           <label className="check"><input type="checkbox" checked={useAi} onChange={(event) => setUseAi(event.target.checked)} /> Use OpenAI for generation</label>
-          <div className="row"><button onClick={createProject} disabled={busy}>Create / Review Plan</button><button onClick={buildNext} disabled={!state || busy}>Build Next</button><button onClick={buildAll} disabled={!state || busy}>Approve Plan + Build All</button><button onClick={workUntilItRuns} disabled={!state || busy || sandboxBusy}>Work Until It Runs</button><button onClick={pauseBuild} disabled={!state || busy}>Pause</button><button onClick={resumeBuild} disabled={!state || busy}>Resume</button><button onClick={validate} disabled={!state || busy}>Validate</button><button onClick={exportZip} disabled={!state}>Export Snapshot</button></div>
+          <div className="row"><button onClick={createProject} disabled={busy}>Create / Review Plan</button><button onClick={buildNext} disabled={!state || busy}>Build Next</button><button onClick={buildAll} disabled={!state || busy}>Approve Plan + Build All</button><button onClick={runAgentTeam} disabled={!state || busy || sandboxBusy}>Run Agent Team</button><button onClick={workUntilItRuns} disabled={!state || busy || sandboxBusy}>Work Until It Runs</button><button onClick={pauseBuild} disabled={!state || busy}>Pause</button><button onClick={resumeBuild} disabled={!state || busy}>Resume</button><button onClick={validate} disabled={!state || busy}>Validate</button><button onClick={exportZip} disabled={!state}>Export Snapshot</button></div>
           {state && <p><b>Status:</b> {state.status} | <b>Progress:</b> {progress.label} | <b>Rejected:</b> {progress.rejected}</p>}
           <h2>Steer While Building</h2><textarea value={change} onChange={(event) => setChange(event.target.value)} placeholder="Change the plan before building, or steer repairs after sandbox errors" /><button onClick={applyChange} disabled={!state || busy}>Apply Instruction</button>
         </section>
         <section className="card"><h2>Spec</h2><pre className="log">{state ? JSON.stringify(state.spec, null, 2) : 'No project yet'}</pre></section>
       </div>
+
+      <section className="card agent-console">
+        <div className="split-head"><div><h2>Agent Team Console</h2><p>See which specialist agents are selected, what they did, and their handoff notes.</p></div><div><button onClick={refreshAgents}>Refresh Agents</button><button onClick={refreshTeamRuns} disabled={!state}>Refresh Runs</button></div></div>
+        <textarea value={teamGoal} onChange={(event) => setTeamGoal(event.target.value)} />
+        <button onClick={runAgentTeam} disabled={!state || busy || sandboxBusy}>Run Selected Agent Team</button>
+        <h3>Available Specialists</h3>
+        <div className="agent-grid">{agents.map((agent) => <article className="agent-card" key={agent.agent_id}><b>{agent.name}</b><p>{agent.role}</p><div>{(agent.skills || []).slice(0, 6).map((skill) => <span className="tag" key={skill}>{skill}</span>)}</div><small>used {agent.projects_used?.length || 0} projects · ✓{agent.success_count || 0} ✕{agent.failure_count || 0}</small></article>)}</div>
+        <h3>Latest Team Run</h3>
+        {latestTeamRun ? <div className="team-run"><div className="team-status"><b>{latestTeamRun.status}</b><span>{latestTeamRun.team_run_id}</span></div><div className="team-steps">{(latestTeamRun.steps || []).map((step) => <article className={`team-step ${step.status}`} key={`${latestTeamRun.team_run_id}-${step.name}`}><b>{step.name}</b><span>{step.status}</span><p>{step.summary || step.goal_template}</p><small>{step.handoff}</small></article>)}</div><h4>Handoffs</h4><pre className="log">{(latestTeamRun.handoffs || []).map((h) => `${h.agent}: ${h.summary}\n${(h.actions || []).join('\n')}`).join('\n\n')}</pre></div> : <p>No team runs yet.</p>}
+      </section>
+
+      <section className="card quality-card">
+        <div className="split-head"><div><h2>Product Quality Score</h2><p>Build passing is not enough. This scores depth, data, workflows, and design.</p></div><button onClick={refreshQuality} disabled={!state}>Refresh Quality</button></div>
+        {quality ? <><div className="quality-score"><strong>{quality.total}/100</strong><span>overall</span></div><div className="quality-bars">{['product_architecture', 'ui_depth', 'workflow_depth', 'data_richness', 'design_system'].map((key) => <div className="quality-bar" key={key}><label>{key.replaceAll('_', ' ')}</label><div><span style={{ width: `${quality[key] || 0}%` }} /></div><b>{quality[key] || 0}</b></div>)}</div>{quality.issues?.length > 0 && <><h3>Issues</h3><ul>{quality.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul><h3>Suggestions</h3><ul>{quality.suggestions.map((item) => <li key={item}>{item}</li>)}</ul></>}</> : <p>No quality score yet.</p>}
+      </section>
+
+      <section className="card memory-card">
+        <div className="split-head"><div><h2>Agent Memory Viewer</h2><p>Reusable lessons from build failures, repairs, quality failures, and agent handoffs.</p></div><div><button onClick={() => refreshMemory('vite import export quality')}>Search Build Lessons</button><button onClick={() => refreshMemory('')}>Recent Memory</button></div></div>
+        <div className="memory-list">{memory.map((item) => <article className="memory-item" key={item.memory_id}><div><b>{item.pattern}</b><span className={item.success ? 'ok' : 'bad'}>{item.success ? 'success' : 'lesson'}</span></div><p>{item.fix || item.lesson || item.symptom}</p><small>{item.category} · {(item.tags || []).join(', ')}</small></article>)}{!memory.length && <p>No memory yet.</p>}</div>
+      </section>
 
       <section className="card planner-card">
         <div className="split-head"><div><h2>Planner Review</h2><p>Review the architecture before file generation starts. Use Apply Instruction to change it, then approve with Build All.</p></div><button onClick={refreshGraph} disabled={!state}>Refresh Plan Map</button></div>
@@ -305,7 +368,7 @@ export default function App() {
       </section>
 
       <section className="card timeline-card">
-        <div className="split-head"><div><h2>Live Timeline</h2><p>Clear steps from planning, snapshots, build, repair, and sandbox activity.</p></div><button onClick={refreshTimeline} disabled={!state}>Refresh Timeline</button></div>
+        <div className="split-head"><div><h2>Live Timeline</h2><p>Clear steps from planning, snapshots, agents, quality checks, build, repair, and sandbox activity.</p></div><button onClick={refreshTimeline} disabled={!state}>Refresh Timeline</button></div>
         <div className="timeline-list">{timeline.slice().reverse().map((event, index) => <div className={`timeline-item ${event.kind}`} key={`${event.kind}-${index}-${event.detail}`}><b>{event.title}</b><span>{event.detail}</span>{fmtTime(event.created_at) && <small>{fmtTime(event.created_at)}</small>}</div>)}{!timeline.length && <p>No timeline events yet.</p>}</div>
       </section>
 
@@ -316,7 +379,7 @@ export default function App() {
       </section>
 
       <section className="card graph-card">
-        <div className="split-head"><div><h2>Project Topology</h2><p>Blueprint dependency map: what each file imports and what depends on it.</p></div><button onClick={refreshGraph} disabled={!state}>Refresh Graph</button></div>
+        <div className="split-head"><div><h2>Dependency Graph Viewer</h2><p>Blueprint dependency map: what each file imports and what depends on it.</p></div><button onClick={refreshGraph} disabled={!state}>Refresh Graph</button></div>
         <div className="graph-grid"><div className="graph-list">{(graph?.nodes || []).map((node) => <button key={node.path} className={`graph-node ${selectedNode?.path === node.path ? 'selected' : ''}`} onClick={() => setSelectedNode(node)}><span>{node.path}</span><em className={node.status === 'valid' ? 'ok' : 'bad'}>{node.status}</em></button>)}{!graph?.nodes?.length && <p>No graph yet.</p>}</div><div className="graph-detail">{selectedNode ? <><h3>{selectedNode.path}</h3><p><b>Status:</b> {selectedNode.status}</p><p><b>Role:</b> {selectedNode.role || 'not set'}</p><h4>Imports</h4><pre className="log">{graphDetails?.imports?.length ? graphDetails.imports.join('\n') : 'none'}</pre><h4>Used by</h4><pre className="log">{graphDetails?.dependents?.length ? graphDetails.dependents.join('\n') : 'none'}</pre>{graphDetails?.file?.errors?.length > 0 && <pre className="bad">{graphDetails.file.errors.join('\n')}</pre>}</> : <p>Select a file.</p>}</div></div>
       </section>
 
