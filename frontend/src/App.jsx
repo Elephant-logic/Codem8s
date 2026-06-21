@@ -3,325 +3,267 @@ import React, { useEffect, useMemo, useState } from 'react';
 const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s.onrender.com';
 
 export default function App() {
-  const [idea, setIdea] = useState('Build a tower defense game with waves, enemies, towers, upgrades, HUD, canvas gameplay, and polished UI');
-  const [change, setChange] = useState('');
+  const [idea, setIdea] = useState('Build a React/Vite tower defense game with waves, enemies, towers, upgrades, HUD, canvas gameplay, specialist game architecture, and polished UI.');
+  const [instruction, setInstruction] = useState('Use the selected specialist agents, dependency topology, agent memory, and command output to fix the current build or quality error.');
   const [state, setState] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [sandboxBusy, setSandboxBusy] = useState(false);
-  const [sandbox, setSandbox] = useState(null);
-  const [sandboxLogLines, setSandboxLogLines] = useState([]);
-  const [sandboxInstruction, setSandboxInstruction] = useState('Use the selected specialist agents, dependency topology, agent memory, and command output to fix the current build or quality error.');
-  const [graph, setGraph] = useState(null);
-  const [selectedNode, setSelectedNode] = useState(null);
-  const [snapshots, setSnapshots] = useState([]);
-  const [timeline, setTimeline] = useState([]);
-  const [snapshotLabel, setSnapshotLabel] = useState('manual checkpoint');
   const [settings, setSettings] = useState(null);
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('gpt-4o-mini');
   const [useAi, setUseAi] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [sandboxBusy, setSandboxBusy] = useState(false);
   const [error, setError] = useState('');
+  const [sandbox, setSandbox] = useState(null);
+  const [sandboxLogs, setSandboxLogs] = useState([]);
   const [agents, setAgents] = useState([]);
   const [teamRuns, setTeamRuns] = useState([]);
   const [memory, setMemory] = useState([]);
   const [quality, setQuality] = useState(null);
-  const [teamGoal, setTeamGoal] = useState('Work as a specialist team until this project is coherent, buildable, product-quality, and exportable.');
+  const [graph, setGraph] = useState(null);
+  const [timeline, setTimeline] = useState([]);
+  const [snapshots, setSnapshots] = useState([]);
 
-  useEffect(() => { loadSettings(); refreshAgents(); refreshMemory(); }, []);
-  useEffect(() => { if (state?.project_id) refreshProjectMeta(); }, [state?.project_id, state?.status]);
+  const hasProject = Boolean(state?.project_id);
+  const controlsLocked = busy || sandboxBusy;
 
   const progress = useMemo(() => {
-    const files = state ? Object.values(state.files) : [];
+    const files = Object.values(state?.files || {});
     const total = files.length;
     const valid = files.filter((file) => file.status === 'valid').length;
     const rejected = files.filter((file) => file.status === 'rejected').length;
-    return { total, valid, rejected, label: total ? `${valid}/${total} valid` : '0/0 valid' };
+    const generated = files.filter((file) => file.content).length;
+    const generationComplete = total > 0 && valid + rejected >= total;
+    return { files, total, valid, rejected, generated, generationComplete };
   }, [state]);
 
-  const planner = useMemo(() => {
-    if (!state?.spec) return null;
-    const fileEntries = Object.entries(state.spec.files || {});
-    const entryPoints = fileEntries.filter(([path]) => /main\.jsx$|App\.jsx$|index\.html$|main\.py$|package\.json$/.test(path));
-    const frontend = fileEntries.filter(([path]) => path.startsWith('frontend/'));
-    const backend = fileEntries.filter(([path]) => path.startsWith('backend/'));
-    const data = fileEntries.filter(([path]) => /data|state|store|model/i.test(path));
-    const systems = fileEntries.filter(([path]) => /system|engine|service|manager|game/i.test(path));
-    return { fileEntries, entryPoints, frontend, backend, data, systems };
-  }, [state]);
+  useEffect(() => { loadSettings(); refreshAgents(); refreshMemory(); }, []);
+  useEffect(() => { if (hasProject) refreshProjectMeta(); }, [state?.project_id, state?.status]);
 
-  const graphDetails = useMemo(() => {
-    if (!graph || !selectedNode) return null;
-    const imports = graph.edges.filter((edge) => edge.to === selectedNode.path).map((edge) => edge.from);
-    const dependents = graph.edges.filter((edge) => edge.from === selectedNode.path).map((edge) => edge.to);
-    const file = state?.files?.[selectedNode.path];
-    return { imports, dependents, file };
-  }, [graph, selectedNode, state]);
+  function unlockControls() {
+    setBusy(false);
+    setSandboxBusy(false);
+    setError('Controls unlocked. Continue with Validate, Agent Team, Sandbox, or Export Snapshot.');
+  }
 
-  const latestTeamRun = teamRuns[0];
-
-  async function request(url, options = {}) {
-    setError('');
-    const response = await fetch(API + url, options);
+  async function request(path, options = {}) {
+    const response = await fetch(API + path, options);
     const text = await response.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = null; }
-    if (!response.ok) throw new Error(data?.detail || text || `Request failed: ${response.status}`);
+    if (!response.ok) throw new Error(data?.detail || text || `Request failed ${response.status}`);
     return data;
   }
 
+  async function safeRun(fn, mode = 'main') {
+    setError('');
+    if (mode === 'sandbox') setSandboxBusy(true); else setBusy(true);
+    try { return await fn(); }
+    catch (err) { setError(String(err.message || err)); return null; }
+    finally { if (mode === 'sandbox') setSandboxBusy(false); else setBusy(false); }
+  }
+
   async function loadSettings() {
-    try { const data = await request('/settings'); setSettings(data); setModel(data.openai_model || 'gpt-4o-mini'); }
-    catch (err) { setError(String(err.message || err)); }
+    try {
+      const data = await request('/settings');
+      setSettings(data);
+      setModel(data.openai_model || 'gpt-4o-mini');
+    } catch (err) { setError(String(err.message || err)); }
   }
 
   async function saveSettings() {
-    setBusy(true);
-    try {
+    await safeRun(async () => {
       const data = await request('/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ openai_api_key: apiKey, openai_model: model }) });
       setSettings(data); setApiKey('');
-    } catch (err) { setError(String(err.message || err)); }
-    finally { setBusy(false); }
-  }
-
-  async function post(url, body = {}) {
-    setBusy(true);
-    try {
-      const data = await request(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      setState(data); return data;
-    } catch (err) { setError(String(err.message || err)); return null; }
-    finally { setBusy(false); }
+    });
   }
 
   async function refreshProjectMeta() {
-    await Promise.all([refreshGraph(), refreshSnapshots(), refreshTimeline(), refreshTeamRuns(), refreshQuality(), refreshMemory()]);
+    await Promise.allSettled([refreshAgents(), refreshTeamRuns(), refreshMemory(), refreshQuality(), refreshGraph(), refreshTimeline(), refreshSnapshots(), refreshSandboxLogs(false)]);
   }
 
   async function refreshAgents() {
-    try { const data = await request('/agents'); setAgents(data.agents || []); }
-    catch (err) { setError(String(err.message || err)); }
+    try { const data = await request('/agents'); setAgents(data.agents || []); } catch {}
+  }
+
+  async function refreshTeamRuns() {
+    if (!hasProject) return;
+    try { const data = await request(`/projects/${state.project_id}/team/runs`); setTeamRuns(data.team_runs || []); } catch {}
   }
 
   async function refreshMemory(query = '') {
     try {
-      const url = query ? `/agent-memory?query=${encodeURIComponent(query)}&limit=30` : '/agent-memory?limit=30';
-      const data = await request(url);
-      setMemory(data.memory || []);
-    } catch (err) { setError(String(err.message || err)); }
-  }
-
-  async function refreshTeamRuns() {
-    if (!state?.project_id) return;
-    try { const data = await request(`/projects/${state.project_id}/team/runs`); setTeamRuns(data.team_runs || []); }
-    catch (err) { setError(String(err.message || err)); }
+      const path = query ? `/agent-memory?query=${encodeURIComponent(query)}&limit=30` : '/agent-memory?limit=30';
+      const data = await request(path); setMemory(data.memory || []);
+    } catch {}
   }
 
   async function refreshQuality() {
-    if (!state?.project_id) return;
-    try { const data = await request(`/projects/${state.project_id}/quality`); setQuality(data); }
-    catch (err) { setError(String(err.message || err)); }
-  }
-
-  async function runAgentTeam() {
-    if (!state) return;
-    setBusy(true); setSandboxBusy(true);
-    try {
-      const result = await request(`/projects/${state.project_id}/team/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goal: teamGoal, max_cycles: 1 }) });
-      if (result.project) setState(result.project);
-      await refreshProjectMeta();
-    } catch (err) { setError(String(err.message || err)); }
-    finally { setBusy(false); setSandboxBusy(false); }
-  }
-
-  async function createProject() {
-    setSandbox(null); setSandboxLogLines([]); setGraph(null); setSelectedNode(null); setSnapshots([]); setTimeline([]); setTeamRuns([]); setQuality(null);
-    const created = await post('/projects', { idea, use_ai: useAi });
-    if (created) setTimeout(refreshProjectMeta, 300);
-  }
-
-  async function buildNext() { if (state) { await post(`/projects/${state.project_id}/build-next`); await refreshProjectMeta(); } }
-
-  async function buildAll() {
-    if (!state) return;
-    setBusy(true);
-    let current = state;
-    try {
-      for (let i = 0; i < 80; i += 1) {
-        const pending = Object.values(current.files || {}).filter((file) => file.status !== 'valid');
-        if (!pending.length) break;
-        const data = await request(`/projects/${current.project_id}/build-next`, { method: 'POST' });
-        current = data; setState(data);
-        await new Promise((resolve) => setTimeout(resolve, 150));
-      }
-      const validated = await request(`/projects/${current.project_id}/validate`, { method: 'POST' });
-      setState(validated); await refreshProjectMeta();
-    } catch (err) { setError(`Build stopped: ${String(err.message || err)}. Press Build All again to continue from saved progress.`); }
-    finally { setBusy(false); }
-  }
-
-  async function pauseBuild() { if (state) await post(`/projects/${state.project_id}/pause`); }
-  async function resumeBuild() { if (state) await post(`/projects/${state.project_id}/resume`); }
-  async function applyChange() { if (state && change.trim()) { await post(`/projects/${state.project_id}/change`, { instruction: change }); setChange(''); await refreshProjectMeta(); } }
-  async function validate() { if (state) { await post(`/projects/${state.project_id}/validate`); await refreshProjectMeta(); } }
-
-  async function exportZip() {
-    if (!state) return;
-    if (state.status !== 'valid') setError('Exporting current snapshot. Build is not green yet, but files will still download.');
-    window.location = API + `/projects/${state.project_id}/export-snapshot`;
-    setTimeout(refreshProjectMeta, 500);
+    if (!hasProject) return;
+    try { setQuality(await request(`/projects/${state.project_id}/quality`)); } catch {}
   }
 
   async function refreshGraph() {
-    if (!state?.project_id) return;
-    try {
-      const data = await request(`/projects/${state.project_id}/graph`);
-      setGraph(data);
-      if (!selectedNode && data.nodes?.length) setSelectedNode(data.nodes[0]);
-    } catch (err) { setError(String(err.message || err)); }
-  }
-
-  async function refreshSnapshots() {
-    if (!state?.project_id) return;
-    try { const data = await request(`/projects/${state.project_id}/snapshots`); setSnapshots(data.snapshots || []); }
-    catch (err) { setError(String(err.message || err)); }
+    if (!hasProject) return;
+    try { setGraph(await request(`/projects/${state.project_id}/graph`)); } catch {}
   }
 
   async function refreshTimeline() {
-    if (!state?.project_id) return;
-    try { const data = await request(`/projects/${state.project_id}/timeline`); setTimeline(data.events || []); }
-    catch (err) { setError(String(err.message || err)); }
+    if (!hasProject) return;
+    try { const data = await request(`/projects/${state.project_id}/timeline`); setTimeline(data.events || []); } catch {}
   }
 
-  async function saveSnapshot() {
-    if (!state) return;
-    setBusy(true);
+  async function refreshSnapshots() {
+    if (!hasProject) return;
+    try { const data = await request(`/projects/${state.project_id}/snapshots`); setSnapshots(data.snapshots || []); } catch {}
+  }
+
+  async function refreshSandboxLogs(showError = true) {
+    if (!hasProject) return;
     try {
-      await request(`/projects/${state.project_id}/snapshot`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label: snapshotLabel || 'manual checkpoint' }) });
+      const data = await request(`/projects/${state.project_id}/sandbox/logs?limit=300`);
+      setSandboxLogs(data.logs || []);
+      const status = await request(`/projects/${state.project_id}/sandbox/status`);
+      setSandbox(status);
+    } catch (err) { if (showError) setError(String(err.message || err)); }
+  }
+
+  async function createProject() {
+    await safeRun(async () => {
+      setSandbox(null); setSandboxLogs([]); setQuality(null); setGraph(null); setTimeline([]); setSnapshots([]); setTeamRuns([]);
+      const created = await request('/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idea, use_ai: useAi }) });
+      setState(created);
+      setTimeout(refreshProjectMeta, 300);
+    });
+  }
+
+  async function buildNext() {
+    if (!hasProject) return;
+    await safeRun(async () => { setState(await request(`/projects/${state.project_id}/build-next`, { method: 'POST' })); await refreshProjectMeta(); });
+  }
+
+  async function buildAll() {
+    if (!hasProject) return;
+    await safeRun(async () => {
+      let current = state;
+      for (let i = 0; i < 100; i += 1) {
+        const pending = Object.values(current.files || {}).filter((file) => file.status !== 'valid');
+        if (!pending.length) break;
+        current = await request(`/projects/${current.project_id}/build-next`, { method: 'POST' });
+        setState(current);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      // Always continue to validation/repair after file generation. Do not leave user stuck at planned/generated.
+      const validated = await request(`/projects/${current.project_id}/validate`, { method: 'POST' });
+      setState(validated);
       await refreshProjectMeta();
-    } catch (err) { setError(String(err.message || err)); }
-    finally { setBusy(false); }
+    });
   }
 
-  async function restoreSnapshot(snapshotId) {
-    if (!state || !snapshotId) return;
-    setBusy(true);
-    try {
-      const restored = await request(`/projects/${state.project_id}/restore/${snapshotId}`, { method: 'POST' });
-      setState(restored); setSandbox(null); setSandboxLogLines([]); await refreshProjectMeta();
-    } catch (err) { setError(String(err.message || err)); }
-    finally { setBusy(false); }
+  async function validateProject() {
+    if (!hasProject) return;
+    await safeRun(async () => { setState(await request(`/projects/${state.project_id}/validate`, { method: 'POST' })); await refreshProjectMeta(); });
+  }
+
+  async function applyInstruction() {
+    if (!hasProject || !instruction.trim()) return;
+    await safeRun(async () => { setState(await request(`/projects/${state.project_id}/change`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) })); await refreshProjectMeta(); });
+  }
+
+  async function runAgentTeam() {
+    if (!hasProject) return;
+    await safeRun(async () => {
+      const result = await request(`/projects/${state.project_id}/team/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ goal: instruction, max_cycles: 1 }) });
+      if (result.project) setState(result.project);
+      await refreshProjectMeta();
+    }, 'sandbox');
   }
 
   async function startSandbox() {
-    if (!state) return;
-    setSandboxBusy(true);
-    try { const data = await request(`/projects/${state.project_id}/sandbox/start`, { method: 'POST' }); setSandbox(data); await refreshSandboxLogs(); await refreshProjectMeta(); }
-    catch (err) { setError(String(err.message || err)); }
-    finally { setSandboxBusy(false); }
-  }
-
-  async function stopSandboxRun() {
-    if (!state) return;
-    setSandboxBusy(true);
-    try { const data = await request(`/projects/${state.project_id}/sandbox/stop`, { method: 'POST' }); setSandbox(data); await refreshSandboxLogs(); await refreshTimeline(); }
-    catch (err) { setError(String(err.message || err)); }
-    finally { setSandboxBusy(false); }
-  }
-
-  async function refreshSandboxStatus() {
-    if (!state) return null;
-    try { const data = await request(`/projects/${state.project_id}/sandbox/status`); setSandbox(data); return data; }
-    catch (err) { setError(String(err.message || err)); return null; }
-  }
-
-  async function refreshSandboxLogs() {
-    if (!state) return null;
-    try {
-      const data = await request(`/projects/${state.project_id}/sandbox/logs?limit=300`);
-      setSandboxLogLines(data.logs || []);
-      const status = await refreshSandboxStatus();
-      return { logs: data.logs || [], status };
-    } catch (err) { setError(String(err.message || err)); return null; }
+    if (!hasProject) return;
+    await safeRun(async () => { setSandbox(await request(`/projects/${state.project_id}/sandbox/start`, { method: 'POST' })); await refreshSandboxLogs(); await refreshProjectMeta(); }, 'sandbox');
   }
 
   async function fixFromSandbox() {
-    if (!state) return null;
-    setSandboxBusy(true);
-    try {
-      const data = await request(`/projects/${state.project_id}/sandbox/fix`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction: sandboxInstruction }) });
-      setSandbox(data); await refreshSandboxLogs(); await validate(); await refreshProjectMeta();
-      return data;
-    } catch (err) { setError(String(err.message || err)); return null; }
-    finally { setSandboxBusy(false); }
+    if (!hasProject) return;
+    await safeRun(async () => {
+      setSandbox(await request(`/projects/${state.project_id}/sandbox/fix`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) }));
+      await refreshSandboxLogs();
+      await refreshProjectMeta();
+    }, 'sandbox');
   }
 
-  async function workThroughSandbox() {
-    if (!state) return;
-    setSandboxBusy(true); setError('');
-    let previousSignature = '';
-    try {
-      let current = await request(`/projects/${state.project_id}/sandbox/start`, { method: 'POST' });
-      setSandbox(current);
+  async function workThroughErrors() {
+    if (!hasProject) return;
+    await safeRun(async () => {
+      let currentSandbox = await request(`/projects/${state.project_id}/sandbox/start`, { method: 'POST' });
+      setSandbox(currentSandbox);
+      let previous = '';
       for (let round = 1; round <= 8; round += 1) {
-        const logData = await request(`/projects/${state.project_id}/sandbox/logs?limit=300`);
-        setSandboxLogLines([...(logData.logs || []), `--- Work-through round ${round} ---`]);
-        const signature = String(current?.last_error || '').slice(-1200);
-        if (current?.build_ok) { await validate(); setError(''); break; }
-        if (signature && signature === previousSignature) { setError('Work-through paused: the same error repeated. Add a steering instruction, then press Work Through again.'); break; }
-        previousSignature = signature;
-        current = await request(`/projects/${state.project_id}/sandbox/fix`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction: sandboxInstruction }) });
-        setSandbox(current); await refreshSandboxLogs(); await refreshProjectMeta();
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await refreshSandboxLogs(false);
+        if (currentSandbox?.build_ok) break;
+        const signature = String(currentSandbox?.last_error || '').slice(-1500);
+        if (signature && signature === previous) {
+          setError('Paused because the same error repeated. Edit the instruction, then press Work Through Errors again.');
+          break;
+        }
+        previous = signature;
+        currentSandbox = await request(`/projects/${state.project_id}/sandbox/fix`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) });
+        setSandbox(currentSandbox);
       }
-    } catch (err) { setError(`Work-through stopped: ${String(err.message || err)}`); }
-    finally { setSandboxBusy(false); }
+      await refreshSandboxLogs();
+      await refreshProjectMeta();
+    }, 'sandbox');
   }
 
   async function workUntilItRuns() {
-    if (!state) return;
-    setSandboxBusy(true); setBusy(true); setError('');
-    const encodedInstruction = encodeURIComponent(sandboxInstruction || 'Work through the project until it runs.');
-    const url = `${API}/projects/${state.project_id}/autonomous/stream?max_rounds=10&instruction=${encodedInstruction}`;
-    const source = new EventSource(url);
-    let finished = false;
-    source.onmessage = (event) => {
-      try {
-        const item = JSON.parse(event.data);
-        setTimeline((current) => [...current, item]);
-        if (item.detail) setSandboxLogLines((current) => [...current.slice(-250), `[${item.title}] ${item.detail}`]);
-        if (item.done) {
-          finished = true;
-          source.close();
-          refreshSandboxLogs().then(refreshProjectMeta);
-          setSandboxBusy(false); setBusy(false);
-        }
-      } catch (err) {
-        setError(`Stream parse error: ${String(err.message || err)}`);
-      }
-    };
-    source.onerror = () => {
-      source.close();
-      if (!finished) setError('Autonomous stream stopped. Refresh timeline/logs to see final state.');
-      refreshSandboxLogs().then(refreshProjectMeta);
-      setSandboxBusy(false); setBusy(false);
-    };
+    if (!hasProject) return;
+    await safeRun(async () => {
+      const encoded = encodeURIComponent(instruction || 'Work through the project until it runs.');
+      await new Promise((resolve) => {
+        const source = new EventSource(`${API}/projects/${state.project_id}/autonomous/stream?max_rounds=10&instruction=${encoded}`);
+        source.onmessage = (event) => {
+          try {
+            const item = JSON.parse(event.data);
+            setTimeline((items) => [...items, item]);
+            if (item.detail) setSandboxLogs((lines) => [...lines.slice(-250), `[${item.title}] ${item.detail}`]);
+            if (item.done) { source.close(); resolve(); }
+          } catch { source.close(); resolve(); }
+        };
+        source.onerror = () => { source.close(); resolve(); };
+      });
+      await refreshSandboxLogs(false);
+      await refreshProjectMeta();
+    }, 'sandbox');
   }
 
-  async function refreshSandboxAll() { await refreshSandboxLogs(); await refreshTimeline(); }
-  function openPreview() { if (sandbox?.preview_url) window.open(sandbox.preview_url, '_blank', 'noopener,noreferrer'); }
-  function fmtTime(seconds) { return seconds && seconds > 100000 ? new Date(seconds * 1000).toLocaleString() : ''; }
+  async function exportSnapshot() {
+    if (!hasProject) return;
+    if (state.status !== 'valid') setError('Exporting current snapshot even though build/quality is not green.');
+    window.location = `${API}/projects/${state.project_id}/export-snapshot`;
+  }
+
+  function openPreview() {
+    if (sandbox?.preview_url) window.open(sandbox.preview_url, '_blank', 'noopener,noreferrer');
+  }
+
+  const latestRun = teamRuns[0];
 
   return (
     <main className="app">
       <h1>Codem8s Full Stack</h1>
-      <p>Plan first. Review topology. Then generate, sandbox, repair, snapshot, and export.</p>
+      <p>Generate files, then keep controls open for validation, agent repair, sandbox, and export.</p>
       <p><b>Backend:</b> {API}</p>
-      {error && <section className="card bad"><b>Error:</b> {error}</section>}
+      {error && <section className="card bad"><b>Notice:</b> {error}</section>}
 
       <section className="card settings">
         <h2>OpenAI Settings</h2>
         <p className={settings?.has_api_key ? 'ok' : 'bad'}>{settings?.has_api_key ? `API key saved: ${settings.masked_api_key}` : 'No API key saved yet'}</p>
-        <div className="row"><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Paste OpenAI API key once, or use Render env var" /><input value={model} onChange={(event) => setModel(event.target.value)} placeholder="Model" /><button onClick={saveSettings} disabled={busy}>Save Settings</button></div>
-        <small>Stored at: {settings?.config_path || 'loading...'}</small>
+        <div className="row">
+          <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Paste OpenAI API key once" />
+          <input value={model} onChange={(event) => setModel(event.target.value)} />
+          <button onClick={saveSettings} disabled={busy}>Save Settings</button>
+          <button className="warning" onClick={unlockControls}>Unlock Controls</button>
+        </div>
       </section>
 
       <div className="grid">
@@ -329,70 +271,69 @@ export default function App() {
           <h2>Idea</h2>
           <textarea value={idea} onChange={(event) => setIdea(event.target.value)} />
           <label className="check"><input type="checkbox" checked={useAi} onChange={(event) => setUseAi(event.target.checked)} /> Use OpenAI for generation</label>
-          <div className="row"><button onClick={createProject} disabled={busy}>Create / Review Plan</button><button onClick={buildNext} disabled={!state || busy}>Build Next</button><button onClick={buildAll} disabled={!state || busy}>Approve Plan + Build All</button><button onClick={runAgentTeam} disabled={!state || busy || sandboxBusy}>Run Agent Team</button><button onClick={workUntilItRuns} disabled={!state || busy || sandboxBusy}>Work Until It Runs</button><button onClick={pauseBuild} disabled={!state || busy}>Pause</button><button onClick={resumeBuild} disabled={!state || busy}>Resume</button><button onClick={validate} disabled={!state || busy}>Validate</button><button onClick={exportZip} disabled={!state}>Export Snapshot</button></div>
-          {state && <p><b>Status:</b> {state.status} | <b>Progress:</b> {progress.label} | <b>Rejected:</b> {progress.rejected}</p>}
-          <h2>Steer While Building</h2><textarea value={change} onChange={(event) => setChange(event.target.value)} placeholder="Change the plan before building, or steer repairs after sandbox errors" /><button onClick={applyChange} disabled={!state || busy}>Apply Instruction</button>
+          <div className="row action-row">
+            <button onClick={createProject} disabled={busy}>Create / Review Plan</button>
+            <button onClick={buildNext} disabled={!hasProject || busy}>Build Next</button>
+            <button onClick={buildAll} disabled={!hasProject || busy}>Approve Plan + Build All</button>
+            <button onClick={validateProject} disabled={!hasProject || busy}>Validate / Repair</button>
+            <button onClick={runAgentTeam} disabled={!hasProject || sandboxBusy}>Run Agent Team</button>
+            <button onClick={startSandbox} disabled={!hasProject || sandboxBusy}>Run Sandbox</button>
+            <button onClick={fixFromSandbox} disabled={!hasProject || sandboxBusy}>AI Fix + Re-run</button>
+            <button onClick={workThroughErrors} disabled={!hasProject || sandboxBusy}>Work Through Errors</button>
+            <button onClick={workUntilItRuns} disabled={!hasProject || sandboxBusy}>Work Until It Runs</button>
+            <button onClick={exportSnapshot} disabled={!hasProject}>Export Snapshot</button>
+          </div>
+          {state && <p><b>Status:</b> {state.status} | <b>Progress:</b> {progress.valid}/{progress.total} valid | <b>Generated:</b> {progress.generated} | <b>Rejected:</b> {progress.rejected}</p>}
+          {progress.generationComplete && state?.status !== 'valid' && <p className="warn">Files are generated. Continue with Validate / Repair, Agent Team, or Sandbox. Controls stay enabled.</p>}
+          <h2>Steer While Building</h2>
+          <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} />
+          <button onClick={applyInstruction} disabled={!hasProject || busy}>Apply Instruction</button>
         </section>
         <section className="card"><h2>Spec</h2><pre className="log">{state ? JSON.stringify(state.spec, null, 2) : 'No project yet'}</pre></section>
       </div>
 
+      <section className="card sandbox-card">
+        <h2>Live Sandbox</h2>
+        <div className="status-pills"><span className={sandbox?.running ? 'pill ok-bg' : 'pill'}>{sandbox?.running ? 'Running' : 'Stopped'}</span><span className={sandbox?.build_ok ? 'pill ok-bg' : 'pill bad-bg'}>{sandbox?.build_ok ? 'Build OK' : 'Build not green'}</span></div>
+        <div className="row"><button onClick={() => refreshSandboxLogs()} disabled={!hasProject}>Refresh Logs</button><button onClick={openPreview} disabled={!sandbox?.preview_url}>Open Preview</button></div>
+        {sandbox && <p><b>Preview:</b> {sandbox.preview_url || 'not started'}<br /><b>Root:</b> {sandbox.root || 'not created'}</p>}
+        {sandbox?.last_error && <pre className="log bad-box">{sandbox.last_error}</pre>}
+        <pre className="log sandbox-log">{sandboxLogs.length ? sandboxLogs.join('\n') : 'No sandbox logs yet'}</pre>
+      </section>
+
       <section className="card agent-console">
-        <div className="split-head"><div><h2>Agent Team Console</h2><p>See which specialist agents are selected, what they did, and their handoff notes.</p></div><div><button onClick={refreshAgents}>Refresh Agents</button><button onClick={refreshTeamRuns} disabled={!state}>Refresh Runs</button></div></div>
-        <textarea value={teamGoal} onChange={(event) => setTeamGoal(event.target.value)} />
-        <button onClick={runAgentTeam} disabled={!state || busy || sandboxBusy}>Run Selected Agent Team</button>
-        <h3>Available Specialists</h3>
-        <div className="agent-grid">{agents.map((agent) => <article className="agent-card" key={agent.agent_id}><b>{agent.name}</b><p>{agent.role}</p><div>{(agent.skills || []).slice(0, 6).map((skill) => <span className="tag" key={skill}>{skill}</span>)}</div><small>used {agent.projects_used?.length || 0} projects · ✓{agent.success_count || 0} ✕{agent.failure_count || 0}</small></article>)}</div>
+        <h2>Agent Team Console</h2>
+        <div className="agent-grid">{agents.map((agent) => <article className="agent-card" key={agent.agent_id}><b>{agent.name}</b><p>{agent.role}</p><div>{(agent.skills || []).slice(0, 6).map((skill) => <span className="tag" key={skill}>{skill}</span>)}</div></article>)}</div>
         <h3>Latest Team Run</h3>
-        {latestTeamRun ? <div className="team-run"><div className="team-status"><b>{latestTeamRun.status}</b><span>{latestTeamRun.team_run_id}</span></div><div className="team-steps">{(latestTeamRun.steps || []).map((step) => <article className={`team-step ${step.status}`} key={`${latestTeamRun.team_run_id}-${step.name}`}><b>{step.name}</b><span>{step.status}</span><p>{step.summary || step.goal_template}</p><small>{step.handoff}</small></article>)}</div><h4>Handoffs</h4><pre className="log">{(latestTeamRun.handoffs || []).map((h) => `${h.agent}: ${h.summary}\n${(h.actions || []).join('\n')}`).join('\n\n')}</pre></div> : <p>No team runs yet.</p>}
+        {latestRun ? <pre className="log">{(latestRun.handoffs || []).map((h) => `${h.agent}: ${h.summary}\n${(h.actions || []).join('\n')}`).join('\n\n')}</pre> : <p>No team runs yet.</p>}
       </section>
 
       <section className="card quality-card">
-        <div className="split-head"><div><h2>Product Quality Score</h2><p>Build passing is not enough. This scores depth, data, workflows, and design.</p></div><button onClick={refreshQuality} disabled={!state}>Refresh Quality</button></div>
-        {quality ? <><div className="quality-score"><strong>{quality.total}/100</strong><span>overall</span></div><div className="quality-bars">{['product_architecture', 'ui_depth', 'workflow_depth', 'data_richness', 'design_system'].map((key) => <div className="quality-bar" key={key}><label>{key.replaceAll('_', ' ')}</label><div><span style={{ width: `${quality[key] || 0}%` }} /></div><b>{quality[key] || 0}</b></div>)}</div>{quality.issues?.length > 0 && <><h3>Issues</h3><ul>{quality.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul><h3>Suggestions</h3><ul>{quality.suggestions.map((item) => <li key={item}>{item}</li>)}</ul></>}</> : <p>No quality score yet.</p>}
-      </section>
-
-      <section className="card memory-card">
-        <div className="split-head"><div><h2>Agent Memory Viewer</h2><p>Reusable lessons from build failures, repairs, quality failures, and agent handoffs.</p></div><div><button onClick={() => refreshMemory('vite import export quality')}>Search Build Lessons</button><button onClick={() => refreshMemory('')}>Recent Memory</button></div></div>
-        <div className="memory-list">{memory.map((item) => <article className="memory-item" key={item.memory_id}><div><b>{item.pattern}</b><span className={item.success ? 'ok' : 'bad'}>{item.success ? 'success' : 'lesson'}</span></div><p>{item.fix || item.lesson || item.symptom}</p><small>{item.category} · {(item.tags || []).join(', ')}</small></article>)}{!memory.length && <p>No memory yet.</p>}</div>
-      </section>
-
-      <section className="card planner-card">
-        <div className="split-head"><div><h2>Planner Review</h2><p>Review the architecture before file generation starts. Use Apply Instruction to change it, then approve with Build All.</p></div><button onClick={refreshGraph} disabled={!state}>Refresh Plan Map</button></div>
-        {planner ? <>
-          <div className="planner-metrics"><span>{planner.fileEntries.length} files planned</span><span>{planner.frontend.length} frontend</span><span>{planner.backend.length} backend</span><span>{planner.systems.length} systems/game/service</span><span>{planner.data.length} data/state</span></div>
-          <div className="planner-grid">
-            <div><h3>Goal</h3><p>{state.spec.goal}</p><h3>Features</h3><ul>{state.spec.features.map((feature) => <li key={feature}>{feature}</li>)}</ul></div>
-            <div><h3>Entry points</h3><pre className="log">{planner.entryPoints.map(([path, purpose]) => `${path} — ${purpose}`).join('\n') || 'none detected'}</pre><h3>Planned file map</h3><pre className="log planner-files">{planner.fileEntries.map(([path, purpose]) => `${path} — ${purpose}`).join('\n')}</pre></div>
-          </div>
-        </> : <p>Create / Review Plan first.</p>}
-      </section>
-
-      <section className="card timeline-card">
-        <div className="split-head"><div><h2>Live Timeline</h2><p>Clear steps from planning, snapshots, agents, quality checks, build, repair, and sandbox activity.</p></div><button onClick={refreshTimeline} disabled={!state}>Refresh Timeline</button></div>
-        <div className="timeline-list">{timeline.slice().reverse().map((event, index) => <div className={`timeline-item ${event.kind}`} key={`${event.kind}-${index}-${event.detail}`}><b>{event.title}</b><span>{event.detail}</span>{fmtTime(event.created_at) && <small>{fmtTime(event.created_at)}</small>}</div>)}{!timeline.length && <p>No timeline events yet.</p>}</div>
-      </section>
-
-      <section className="card snapshot-card">
-        <div className="split-head"><div><h2>Snapshot History</h2><p>Save checkpoints and restore older versions when a repair goes wrong.</p></div><button onClick={refreshSnapshots} disabled={!state}>Refresh Snapshots</button></div>
-        <div className="row"><input value={snapshotLabel} onChange={(event) => setSnapshotLabel(event.target.value)} placeholder="snapshot label" /><button onClick={saveSnapshot} disabled={!state || busy}>Save Snapshot</button></div>
-        <div className="snapshot-list">{snapshots.slice().reverse().map((item) => <div className="snapshot-item" key={item.snapshot_id}><div><b>{item.snapshot_id}</b> <span>{item.label}</span><small>{fmtTime(item.created_at)}</small></div><div><span className={item.status === 'valid' ? 'ok' : 'bad'}>{item.status}</span> <span>{item.valid_count}/{item.file_count} valid</span><button onClick={() => restoreSnapshot(item.snapshot_id)} disabled={busy}>Restore</button></div></div>)}{!snapshots.length && <p>No snapshots yet.</p>}</div>
+        <h2>Product Quality Score</h2>
+        {quality ? <><div className="quality-score"><strong>{quality.total}/100</strong><span>overall</span></div><div className="quality-bars">{['product_architecture', 'ui_depth', 'workflow_depth', 'data_richness', 'design_system'].map((key) => <div className="quality-bar" key={key}><label>{key.replaceAll('_', ' ')}</label><div><span style={{ width: `${quality[key] || 0}%` }} /></div><b>{quality[key] || 0}</b></div>)}</div>{quality.issues?.map((issue) => <p className="bad" key={issue}>• {issue}</p>)}</> : <p>No quality score yet.</p>}
       </section>
 
       <section className="card graph-card">
-        <div className="split-head"><div><h2>Dependency Graph Viewer</h2><p>Blueprint dependency map: what each file imports and what depends on it.</p></div><button onClick={refreshGraph} disabled={!state}>Refresh Graph</button></div>
-        <div className="graph-grid"><div className="graph-list">{(graph?.nodes || []).map((node) => <button key={node.path} className={`graph-node ${selectedNode?.path === node.path ? 'selected' : ''}`} onClick={() => setSelectedNode(node)}><span>{node.path}</span><em className={node.status === 'valid' ? 'ok' : 'bad'}>{node.status}</em></button>)}{!graph?.nodes?.length && <p>No graph yet.</p>}</div><div className="graph-detail">{selectedNode ? <><h3>{selectedNode.path}</h3><p><b>Status:</b> {selectedNode.status}</p><p><b>Role:</b> {selectedNode.role || 'not set'}</p><h4>Imports</h4><pre className="log">{graphDetails?.imports?.length ? graphDetails.imports.join('\n') : 'none'}</pre><h4>Used by</h4><pre className="log">{graphDetails?.dependents?.length ? graphDetails.dependents.join('\n') : 'none'}</pre>{graphDetails?.file?.errors?.length > 0 && <pre className="bad">{graphDetails.file.errors.join('\n')}</pre>}</> : <p>Select a file.</p>}</div></div>
+        <h2>Dependency Graph Viewer</h2>
+        <div className="graph-list">{(graph?.nodes || []).map((node) => <button key={node.path} className="graph-node"><span>{node.path}</span><em className={node.status === 'valid' ? 'ok' : 'bad'}>{node.status}</em></button>)}</div>
       </section>
 
-      <section className="card sandbox-card">
-        <div className="split-head"><div><h2>Live Sandbox</h2><p>Runs dependency install, build, dev server, and shows the command line output.</p></div><div className="status-pills"><span className={sandbox?.running ? 'pill ok-bg' : 'pill'}>{sandbox?.running ? 'Running' : 'Stopped'}</span><span className={sandbox?.build_ok ? 'pill ok-bg' : 'pill bad-bg'}>{sandbox?.build_ok ? 'Build OK' : 'Build not green'}</span></div></div>
-        <div className="row"><button onClick={startSandbox} disabled={!state || sandboxBusy}>Run Sandbox</button><button onClick={stopSandboxRun} disabled={!state || sandboxBusy}>Stop Sandbox</button><button onClick={refreshSandboxAll} disabled={!state || sandboxBusy}>Refresh Logs</button><button onClick={openPreview} disabled={!sandbox?.preview_url}>Open Preview</button></div>
-        <h3>AI Fix From Sandbox</h3><textarea value={sandboxInstruction} onChange={(event) => setSandboxInstruction(event.target.value)} placeholder="Tell AI what to try using the command output" />
-        <div className="row"><button onClick={fixFromSandbox} disabled={!state || sandboxBusy}>AI Fix + Re-run</button><button onClick={workThroughSandbox} disabled={!state || sandboxBusy}>Work Through Errors</button><button onClick={workUntilItRuns} disabled={!state || busy || sandboxBusy}>Work Until It Runs</button></div>
-        {sandbox && <div className="sandbox-status"><p><b>Preview:</b> {sandbox.preview_url || 'not started'}</p><p><b>Root:</b> {sandbox.root || 'not created'}</p>{sandbox.last_error && <pre className="log bad-box">{sandbox.last_error}</pre>}</div>}
-        <pre className="log sandbox-log">{sandboxLogLines.length ? sandboxLogLines.join('\n') : 'No sandbox logs yet'}</pre>
+      <section className="card memory-card">
+        <h2>Agent Memory Viewer</h2>
+        <div className="memory-list">{memory.map((item) => <article className="memory-item" key={item.memory_id}><b>{item.pattern}</b><p>{item.fix || item.lesson || item.symptom}</p><small>{item.category} · {(item.tags || []).join(', ')}</small></article>)}</div>
       </section>
 
-      <section className="card"><h2>Files</h2>{state && Object.values(state.files).map((file) => <div className="file" key={file.path}><b>{file.path}</b> <span className={file.status === 'valid' ? 'ok' : 'bad'}>{file.status}</span>{typeof file.attempts === 'number' && <span> attempts:{file.attempts}</span>}{file.content && <pre className="log">{file.content.slice(0, 1200)}</pre>}{file.errors?.length > 0 && <pre className="bad">{file.errors.join('\n')}</pre>}</div>)}</section>
+      <section className="card timeline-card">
+        <h2>Timeline</h2>
+        <div className="timeline-list">{timeline.slice().reverse().map((event, index) => <div className={`timeline-item ${event.kind}`} key={`${index}-${event.detail}`}><b>{event.title}</b><span>{event.detail}</span></div>)}</div>
+      </section>
+
+      <section className="card snapshot-card">
+        <h2>Snapshots</h2>
+        <div className="snapshot-list">{snapshots.slice().reverse().map((item) => <div className="snapshot-item" key={item.snapshot_id}><span>{item.label}</span><span>{item.status}</span><span>{item.valid_count}/{item.file_count} valid</span></div>)}</div>
+      </section>
+
+      <section className="card"><h2>Files</h2>{progress.files.map((file) => <div className="file" key={file.path}><b>{file.path}</b> <span className={file.status === 'valid' ? 'ok' : 'bad'}>{file.status}</span>{file.content && <pre className="log">{file.content.slice(0, 1000)}</pre>}{file.errors?.length > 0 && <pre className="bad">{file.errors.join('\n')}</pre>}</div>)}</section>
       <section className="card"><h2>Logs</h2><pre className="log">{state?.logs?.join('\n') || ''}</pre></section>
     </main>
   );
