@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .agent_build_repair import real_build_repair_project
@@ -20,13 +21,14 @@ from .generator import apply_instruction, build_spec, generate_file
 from .models import BuildRequest, BuildState, ChangeRequest, FileSpec
 from .product_quality import quality_as_dict, quality_repair_prompt, score_product_quality
 from .project_store import load_all_projects, load_project, save_project
-from .sandbox import sandbox_logs, sandbox_status, start_sandbox, stop_sandbox
+from .sandbox import ensure_preview_root, sandbox_logs, sandbox_status, start_sandbox, stop_sandbox
 from .settings import SettingsIn, SettingsOut, save_settings, settings_status
 from .snapshot_store import create_snapshot, list_snapshots, restore_snapshot
 from .validator import validate_file, validate_project_against_spec
 
 app = FastAPI(title="Codem8s Full Stack")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.mount("/preview", StaticFiles(directory=str(ensure_preview_root()), html=True), name="preview")
 
 PROJECTS: dict[str, BuildState] = load_all_projects()
 MAX_BUILD_ALL_STEPS = 50
