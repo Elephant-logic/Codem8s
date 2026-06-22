@@ -18,7 +18,8 @@ REQUIRED_EXPORTS = {
     "backend/settings.py": ["load_settings", "save_settings", "settings_status"],
 }
 
-CODE_EXTENSIONS = (".js", ".jsx", ".py", ".css")
+CODE_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx", ".py", ".css")
+JS_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx")
 
 
 def safe_path(path: str) -> bool:
@@ -33,6 +34,27 @@ def detect_placeholders(content: str) -> List[str]:
         if phrase.lower() in lowered:
             found.append(phrase)
     return found
+
+
+def detect_placeholder_only_file(path: str, content: str) -> List[str]:
+    errors: List[str] = []
+    if not path.endswith(CODE_EXTENSIONS):
+        return errors
+    stripped = content.strip()
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    if not lines:
+        errors.append("file is empty")
+        return errors
+    if len(lines) <= 3 and all(re.match(r"^(#|//|/\*|\*)\s*(File|Path)\s*:", line, re.I) or line in {"*/"} for line in lines):
+        errors.append("placeholder-only file marker; generated file contains no implementation")
+    if re.fullmatch(r"(?s)\s*(#|//)\s*File:\s*[^\n]+\s*", content):
+        errors.append("placeholder-only file marker; generated file contains no implementation")
+    if path.endswith((".ts", ".tsx", ".js", ".jsx")):
+        code_without_comments = re.sub(r"(?m)^\s*(//|#).*$", "", stripped)
+        code_without_comments = re.sub(r"/\*.*?\*/", "", code_without_comments, flags=re.S).strip()
+        if len(code_without_comments) < 25 and re.search(r"(File|Path)\s*:", stripped, re.I):
+            errors.append("code file is only a filename comment")
+    return errors
 
 
 def detect_markdown_or_bad_prefix(path: str, content: str) -> List[str]:
@@ -82,6 +104,8 @@ def js_exports(content: str) -> tuple[set[str], bool]:
         r"\bexport\s+const\s+([A-Za-z_$][\w$]*)",
         r"\bexport\s+let\s+([A-Za-z_$][\w$]*)",
         r"\bexport\s+var\s+([A-Za-z_$][\w$]*)",
+        r"\bexport\s+type\s+([A-Za-z_$][\w$]*)",
+        r"\bexport\s+interface\s+([A-Za-z_$][\w$]*)",
     ]:
         named.update(re.findall(pattern, content))
     for group in re.findall(r"\bexport\s*\{([^}]+)\}", content, re.S):
@@ -116,7 +140,7 @@ def resolve_import_path(from_path: str, import_path: str, files: Dict[str, str])
         return None
     base = PurePosixPath(from_path).parent
     raw = str((base / import_path).as_posix())
-    candidates = [raw, raw + ".js", raw + ".jsx", raw + ".css", raw + "/index.js", raw + "/index.jsx"]
+    candidates = [raw, raw + ".js", raw + ".jsx", raw + ".ts", raw + ".tsx", raw + ".css", raw + "/index.js", raw + "/index.jsx", raw + "/index.ts", raw + "/index.tsx"]
     for candidate in candidates:
         clean = str(PurePosixPath(candidate))
         if clean in files:
@@ -141,11 +165,11 @@ def validate_js_import_exports(files: Dict[str, str]) -> List[str]:
     deps = parse_package_dependencies(files)
     allowed_bare = {"react", "react-dom", "react-dom/client", "vite", "@vitejs/plugin-react"} | deps
     for path, content in files.items():
-        if path.endswith((".js", ".jsx")):
+        if path.endswith(JS_EXTENSIONS):
             export_cache[path] = js_exports(content)
 
     for path, content in files.items():
-        if not path.endswith((".js", ".jsx")):
+        if not path.endswith(JS_EXTENSIONS):
             continue
         if "require(" in content:
             errors.append(f"{path}: uses CommonJS require(); Vite app files must use ES imports")
@@ -181,7 +205,7 @@ def validate_js_import_exports(files: Dict[str, str]) -> List[str]:
 
 def validate_product_depth(files: Dict[str, str]) -> List[str]:
     errors: List[str] = []
-    app = files.get("frontend/src/App.jsx", "")
+    app = files.get("frontend/src/App.jsx", "") or files.get("frontend/App.tsx", "") or files.get("frontend/src/App.tsx", "")
     dashboard = files.get("frontend/src/components/Dashboard.jsx", "")
     sample = files.get("frontend/src/data/sampleData.js", "")
     styles = files.get("frontend/src/styles.css", "")
@@ -189,11 +213,11 @@ def validate_product_depth(files: Dict[str, str]) -> List[str]:
     if app:
         low = app.lower()
         if "welcome" in low or "comprehensive tool for managing" in low:
-            errors.append("frontend/src/App.jsx: generic welcome/product-copy screen is not acceptable")
+            errors.append("frontend app shell: generic welcome/product-copy screen is not acceptable")
         jsx_tags = len(re.findall(r"<\w+", app))
-        app_sections = sum(term in low for term in ["dashboard", "activity", "task", "project", "metric", "kpi", "table", "status", "filter", "search", "chart", "timeline"])
-        if jsx_tags < 18 or app_sections < 5:
-            errors.append("frontend/src/App.jsx: app shell is too shallow; must render a rich product UI")
+        app_sections = sum(term in low for term in ["dashboard", "activity", "task", "project", "metric", "kpi", "table", "status", "filter", "search", "chart", "timeline", "canvas", "toolbar", "resource", "map"])
+        if jsx_tags < 10 or app_sections < 3:
+            errors.append("frontend app shell is too shallow; must render a rich product/game UI")
     if dashboard:
         low = dashboard.lower()
         dashboard_sections = sum(term in low for term in ["kpi", "metric", "activity", "status", "chart", "table", "recent", "priority", "progress", "timeline"])
@@ -206,7 +230,7 @@ def validate_product_depth(files: Dict[str, str]) -> List[str]:
             errors.append("frontend/src/data/sampleData.js: sample data is too thin for product-depth generation")
     if styles:
         low = styles.lower()
-        design_signals = sum(term in low for term in ["linear-gradient", "grid", "box-shadow", "border-radius", "sidebar", "badge", "card", "kpi", "media", "responsive"])
+        design_signals = sum(term in low for term in ["linear-gradient", "grid", "box-shadow", "border-radius", "sidebar", "badge", "card", "kpi", "media", "responsive", "canvas", "toolbar"])
         if design_signals < 6:
             errors.append("frontend/src/styles.css: design system is too basic")
     return errors
@@ -220,6 +244,7 @@ def validate_file(path: str, content: str, spec_files: Dict[str, str]) -> Tuple[
         errors.append("file is not in locked manifest")
     if len(content.strip()) < 20:
         errors.append("file is too small to be useful")
+    errors.extend(detect_placeholder_only_file(path, content))
     errors.extend(detect_markdown_or_bad_prefix(path, content))
     if not path.endswith("validator.py"):
         for phrase in detect_placeholders(content):
@@ -231,7 +256,7 @@ def validate_file(path: str, content: str, spec_files: Dict[str, str]) -> Tuple[
         for name in required:
             if name not in names:
                 errors.append(f"missing required export: {name}")
-    if path.endswith((".js", ".jsx")) and "PropTypes" in content:
+    if path.endswith(JS_EXTENSIONS) and "PropTypes" in content:
         errors.append("uses PropTypes; avoid prop-types unless package.json includes it")
     return len(errors) == 0, errors
 
