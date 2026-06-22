@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: codem8s
+    env: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /settings
+    envVars:
+      - key: CODEM8S_DATA_DIR
+        value: /data/codem8s
+      - key: CODEM8S_PREVIEW_DIR
+        value: /data/codem8s/previews
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    disk:
+      name: codem8s-data
+      mountPath: /data
+      sizeGB: 1
