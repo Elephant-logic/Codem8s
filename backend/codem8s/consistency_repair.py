@@ -62,7 +62,6 @@ def _relative_spec(from_path: str, target_path: str) -> str:
         rel = '/'.join(rel_parts)
         if not rel.startswith('.'):
             rel = './' + rel
-    # Vite handles extensionless JS imports, but explicit extensions make generated graphs less ambiguous.
     return rel
 
 
@@ -88,7 +87,6 @@ def _repair_import_paths(path: str, code: str, files: dict[str, str], logs: list
         candidates = basename_index.get(key) or basename_index.get(PurePosixPath(key).stem.lower()) or []
         if not candidates:
             return match.group(0)
-        # Prefer same broad frontend area but allow crossing from src/game to src/systems/ui.
         candidates = sorted(candidates, key=lambda p: (0 if '/src/' in p else 1, len(p)))
         target = candidates[0]
         new_spec = _relative_spec(path, target)
@@ -128,9 +126,8 @@ def _imported_named_symbols(import_what: str) -> list[str]:
     out = []
     for raw in m.group(1).split(','):
         raw = raw.strip()
-        if not raw:
-            continue
-        out.append(raw.split(' as ')[0].strip())
+        if raw:
+            out.append(raw.split(' as ')[0].strip())
     return out
 
 
@@ -155,9 +152,8 @@ def _ensure_missing_named_exports(path: str, code: str, all_files: dict[str, str
         if name in declared:
             additions.append(name)
         else:
-            # For generated system modules, create an object facade from existing function exports.
             funcs = sorted(n for n in exported if n and n[0].islower())
-            if funcs and name.endswith('System') or funcs and name.endswith('Manager'):
+            if (funcs and name.endswith('System')) or (funcs and name.endswith('Manager')):
                 body = ', '.join(funcs)
                 code = code.rstrip() + f"\nconst {name} = {{ {body} }};\n"
                 additions.append(name)
@@ -198,6 +194,59 @@ def _ensure_data_aliases(path: str, code: str) -> str:
     return code
 
 
+def _ensure_use_game_loop_facade(path: str, code: str, logs: list[str]) -> str:
+    if not path.endswith('/useGameLoop.js'):
+        return code
+    if all(name in code for name in ['update:', 'draw:', 'stop:']):
+        return code
+    if 'export function useGameLoop' in code or 'export const useGameLoop' in code or 'function useGameLoop' in code or 'const useGameLoop' in code:
+        patch = """
+
+// Deterministic runtime facade: older generated canvases expect update/draw/stop.
+export function createGameLoopFacade(callback = () => {}) {
+  let running = true;
+  return {
+    update: (dt = 16) => { if (running) callback(dt); },
+    draw: () => {},
+    stop: () => { running = false; },
+    start: () => { running = true; },
+  };
+}
+"""
+        if 'createGameLoopFacade' not in code:
+            code = code.rstrip() + patch
+        code = re.sub(r"return\s*\{([^}]*)\}", lambda m: m.group(0) if all(k in m.group(1) for k in ['update', 'draw', 'stop']) else "return { ...createGameLoopFacade(), " + m.group(1).strip() + " }", code, count=1, flags=re.S)
+        logs.append(f'Deterministic runtime repair in {path}: ensured update/draw/stop facade')
+    return code
+
+
+def _ensure_tile_is_adjacent(path: str, code: str, logs: list[str]) -> str:
+    if not path.endswith('/Tile.js'):
+        return code
+    if 'isAdjacent' in code:
+        return code
+    addition = """
+
+export function isAdjacent(a, b) {
+  if (!a || !b) return false;
+  const ax = Number(a.x ?? 0);
+  const ay = Number(a.y ?? 0);
+  const bx = Number(b.x ?? 0);
+  const by = Number(b.y ?? 0);
+  return Math.abs(ax - bx) + Math.abs(ay - by) === 1;
+}
+"""
+    code = code.rstrip() + addition
+    logs.append(f'Deterministic runtime repair in {path}: added isAdjacent')
+    return code
+
+
+def _repair_known_runtime_risks(path: str, code: str, logs: list[str]) -> str:
+    code = _ensure_use_game_loop_facade(path, code, logs)
+    code = _ensure_tile_is_adjacent(path, code, logs)
+    return code
+
+
 def deterministic_consistency_repair(files: dict[str, str]) -> tuple[dict[str, str], list[str]]:
     repaired = dict(files)
     logs: list[str] = []
@@ -208,13 +257,13 @@ def deterministic_consistency_repair(files: dict[str, str]) -> tuple[dict[str, s
         code = _remove_missing_css_imports(path, code, repaired)
         code = _repair_import_paths(path, code, repaired, logs)
         code = _ensure_data_aliases(path, code)
+        code = _repair_known_runtime_risks(path, code, logs)
         if path.endswith('.jsx') and ('/components/' in path or '/ui/' in path or '/pages/' in path or '/scenes/' in path):
             code = _ensure_default_component_export(path, code)
         if code != original:
             repaired[path] = code
             logs.append(f'Deterministic consistency repair updated {path}')
 
-    # Second pass after import paths are repaired: make imported named symbols actually exported.
     for path, original in list(repaired.items()):
         if not path.endswith(('.js', '.jsx', '.ts', '.tsx')):
             continue
