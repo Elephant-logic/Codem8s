@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
-import threading
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
 from .models import BuildState
+
+DATA_DIR = Path(os.environ.get("CODEM8S_DATA_DIR", "/opt/render/.codem8s"))
+PREVIEW_ROOT = Path(os.environ.get("CODEM8S_PREVIEW_DIR", str(DATA_DIR / "previews")))
+
+
+def ensure_preview_root() -> Path:
+    PREVIEW_ROOT.mkdir(parents=True, exist_ok=True)
+    return PREVIEW_ROOT
 
 
 class SandboxSession:
@@ -20,15 +29,21 @@ class SandboxSession:
         self.build_ok = False
         self.last_error = ""
         self.preview_url = ""
-        self.dev_process: subprocess.Popen[str] | None = None
+        self.preview_path = ensure_preview_root() / project_id
         self.created_at = time.time()
 
     def add_log(self, text: str) -> None:
-        for line in text.splitlines():
-            self.logs.append(line[-2000:])
-        self.logs = self.logs[-800:]
+        for line in str(text).splitlines():
+            self.logs.append(line[-2500:])
+        self.logs = self.logs[-1200:]
 
     def write_files(self, state: BuildState) -> None:
+        if self.root.exists():
+            for item in self.root.iterdir():
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
         for path, item in state.files.items():
             if not item.content:
                 continue
@@ -37,13 +52,22 @@ class SandboxSession:
             target.write_text(item.content, encoding="utf-8")
         self.add_log(f"Wrote project files to {self.root}")
 
-    def run(self, cmd: list[str], cwd: Path, timeout: int = 180) -> tuple[bool, str]:
+    def run(self, cmd: list[str], cwd: Path, timeout: int = 240) -> tuple[bool, str]:
         self.add_log("$ " + " ".join(cmd))
         try:
             proc = subprocess.run(cmd, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
-            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
-            self.add_log(output)
+            output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+            self.add_log(output or f"Command exited {proc.returncode}")
             return proc.returncode == 0, output
+        except FileNotFoundError as exc:
+            output = (
+                f"Command not found: {cmd[0]}\n"
+                "Live builds require the Docker backend image with Node/npm installed. "
+                "Deploy the backend using the repository Dockerfile, not the Python buildpack.\n"
+                f"{exc}"
+            )
+            self.add_log(output)
+            return False, output
         except subprocess.TimeoutExpired as exc:
             output = f"Timed out: {' '.join(cmd)}\n{exc}"
             self.add_log(output)
@@ -59,53 +83,54 @@ class SandboxSession:
             self.last_error = "No frontend folder found"
             self.add_log(self.last_error)
             return False
-        ok, out = self.run(["npm", "install", "--silent"], frontend, timeout=240)
+
+        ok, out = self.run(["node", "--version"], frontend, timeout=30)
         if not ok:
             self.last_error = out[-8000:]
+            self.build_ok = False
             return False
-        ok, out = self.run(["npm", "run", "build"], frontend, timeout=240)
+        self.run(["npm", "--version"], frontend, timeout=30)
+
+        install_cmd = ["npm", "ci", "--silent"] if (frontend / "package-lock.json").exists() else ["npm", "install", "--silent"]
+        ok, out = self.run(install_cmd, frontend, timeout=360)
+        if not ok:
+            self.last_error = out[-8000:]
+            self.build_ok = False
+            return False
+
+        ok, out = self.run(["npm", "run", "build", "--", "--base", "./"], frontend, timeout=360)
         self.build_ok = ok
         if not ok:
             self.last_error = out[-8000:]
-        else:
-            self.last_error = ""
-            self.add_log("Build passed")
-        return ok
+            self.running = False
+            return False
 
-    def start_dev(self, port: int) -> None:
-        frontend = self.root / "frontend"
-        if not frontend.exists():
-            self.add_log("No frontend folder found; cannot start preview")
-            return
-        if self.dev_process and self.dev_process.poll() is None:
-            self.add_log("Preview already running")
-            return
-        cmd = ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", str(port)]
-        self.add_log("$ " + " ".join(cmd))
-        self.dev_process = subprocess.Popen(cmd, cwd=str(frontend), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        dist = frontend / "dist"
+        if not dist.exists():
+            self.last_error = "Build completed but frontend/dist was not created"
+            self.add_log(self.last_error)
+            self.build_ok = False
+            self.running = False
+            return False
+
+        if self.preview_path.exists():
+            shutil.rmtree(self.preview_path, ignore_errors=True)
+        self.preview_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(dist, self.preview_path)
+        self.preview_url = f"/preview/{self.project_id}/index.html"
         self.running = True
-        self.preview_url = f"http://localhost:{port}"
-
-        def reader() -> None:
-            assert self.dev_process and self.dev_process.stdout
-            for line in self.dev_process.stdout:
-                self.add_log(line.rstrip())
-
-        threading.Thread(target=reader, daemon=True).start()
+        self.last_error = ""
+        self.add_log("Build passed")
+        self.add_log(f"Preview copied to {self.preview_path}")
+        self.add_log(f"Preview available at {self.preview_url}")
+        return True
 
     def stop(self) -> None:
-        if self.dev_process and self.dev_process.poll() is None:
-            self.dev_process.terminate()
-            try:
-                self.dev_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.dev_process.kill()
         self.running = False
-        self.add_log("Sandbox stopped")
+        self.add_log("Sandbox preview marked stopped")
 
     def status(self) -> dict[str, Any]:
-        alive = bool(self.dev_process and self.dev_process.poll() is None)
-        self.running = alive
+        self.running = self.build_ok and self.preview_path.exists()
         return {
             "project_id": self.project_id,
             "running": self.running,
@@ -113,6 +138,7 @@ class SandboxSession:
             "preview_url": self.preview_url,
             "last_error": self.last_error[-4000:],
             "root": str(self.root),
+            "preview_path": str(self.preview_path),
             "log_count": len(self.logs),
         }
 
@@ -132,7 +158,6 @@ def start_sandbox(state: BuildState, port: int = 5173) -> dict[str, Any]:
     session = get_or_create_session(state)
     session.write_files(state)
     session.install_and_build()
-    session.start_dev(port)
     return session.status()
 
 
