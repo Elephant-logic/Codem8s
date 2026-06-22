@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 
 const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s-docker.onrender.com';
+const QUALITY_TARGET = 72;
 
 export default function App() {
   const [idea, setIdea] = useState('Build a React/Vite tower defense game with waves, enemies, towers, upgrades, HUD, canvas gameplay, specialist game architecture, and polished UI.');
@@ -16,6 +17,9 @@ export default function App() {
 
   const projectId = state?.project_id;
   const files = Object.values(state?.files || {});
+  const buildPassed = Boolean(sandbox?.build_ok);
+  const qualityNeedsWork = buildPassed && quality && quality.total < QUALITY_TARGET;
+  const displayStatus = buildPassed ? (qualityNeedsWork ? 'build passed / quality needs improvement' : 'build passed') : (state?.status || 'no project');
   const progress = useMemo(() => ({
     total: files.length,
     valid: files.filter((f) => f.status === 'valid').length,
@@ -129,6 +133,21 @@ export default function App() {
     });
   }
 
+  async function improveQuality() {
+    if (!projectId) return;
+    const issues = quality?.issues?.join('; ') || 'Improve product depth, sample data, design system, workflows, and real app states.';
+    const qualityInstruction = `Improve product quality without breaking the passing build. Current quality score is ${quality?.total || 0}/100. Fix these issues: ${issues}. Add deeper dashboard/product screens, richer seed data, search/filter workflows, empty/loading/error states, polished design system, and realistic interactions. Keep Vite build green.`;
+    await run('Improving quality, then rebuilding sandbox...', async () => {
+      const changed = await post(`/projects/${projectId}/change`, { instruction: qualityInstruction });
+      setState(changed);
+      const result = await post(`/projects/${projectId}/team/run`, { goal: qualityInstruction, max_cycles: 1 });
+      if (result.project) setState(result.project);
+      const id = result.project?.project_id || changed.project_id;
+      await refresh(id);
+      await runSandbox(id);
+    });
+  }
+
   async function workErrors() {
     if (!projectId) return;
     await run('Working through build errors...', async () => {
@@ -166,15 +185,16 @@ export default function App() {
   return (
     <main className="app">
       <h1>Codem8s Full Stack</h1>
-      <p>Generate → repair → real npm build → sandbox preview → export.</p>
+      <p>Generate → repair → real npm build → sandbox preview → quality improve → export.</p>
       <p><b>Backend:</b> {API}</p>
       {notice && <section className="card running"><b>{notice}</b>{busy && <div className="spinner" />}</section>}
       <div className="grid">
         <section className="card">
           <h2>Idea</h2>
           <textarea value={idea} onChange={(e) => setIdea(e.target.value)} />
-          <div className="row action-row"><button onClick={createProject} disabled={busy}>Create / Review Plan</button><button onClick={buildNext} disabled={!projectId || busy}>Build Next</button><button onClick={buildAllSandbox} disabled={!projectId || busy}>Approve + Build + Sandbox</button><button onClick={validateSandbox} disabled={!projectId || busy}>Validate / Repair + Sandbox</button><button onClick={agentTeamSandbox} disabled={!projectId || busy}>Run Agents + Sandbox</button><button onClick={() => runSandbox()} disabled={!projectId || busy}>Run Sandbox Build</button><button onClick={aiFix} disabled={!projectId || busy}>AI Fix + Re-run</button><button onClick={workErrors} disabled={!projectId || busy}>Work Through Errors</button><button onClick={exportZip} disabled={!projectId}>Export Snapshot</button></div>
-          {state && <p><b>Status:</b> {state.status} | <b>Progress:</b> {progress.valid}/{progress.total} valid | <b>Generated:</b> {progress.generated} | <b>Rejected:</b> {progress.rejected}</p>}
+          <div className="row action-row"><button onClick={createProject} disabled={busy}>Create / Review Plan</button><button onClick={buildNext} disabled={!projectId || busy}>Build Next</button><button onClick={buildAllSandbox} disabled={!projectId || busy}>Approve + Build + Sandbox</button><button onClick={validateSandbox} disabled={!projectId || busy}>Validate / Repair + Sandbox</button><button onClick={agentTeamSandbox} disabled={!projectId || busy}>Run Agents + Sandbox</button><button onClick={() => runSandbox()} disabled={!projectId || busy}>Run Sandbox Build</button><button onClick={improveQuality} disabled={!projectId || busy}>Improve Quality + Rebuild</button><button onClick={aiFix} disabled={!projectId || busy}>AI Fix + Re-run</button><button onClick={workErrors} disabled={!projectId || busy}>Work Through Errors</button><button onClick={exportZip} disabled={!projectId}>Export Snapshot</button></div>
+          {state && <p><b>Status:</b> {displayStatus} | <b>Progress:</b> {progress.valid}/{progress.total} valid | <b>Generated:</b> {progress.generated} | <b>Rejected:</b> {progress.rejected}</p>}
+          {qualityNeedsWork && <p className="warn">Build is green. Quality is below target. Press Improve Quality + Rebuild.</p>}
           <h2>Steer While Building</h2><textarea value={instruction} onChange={(e) => setInstruction(e.target.value)} /><button onClick={applyInstruction} disabled={!projectId || busy}>Apply Instruction</button>
         </section>
         <section className="card"><h2>Spec</h2><pre className="log">{state ? JSON.stringify(state.spec, null, 2) : 'No project yet'}</pre></section>
