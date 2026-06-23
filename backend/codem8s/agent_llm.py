@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import urllib.error
 import urllib.request
 from typing import Any
@@ -10,9 +11,17 @@ from typing import Any
 logger = logging.getLogger("codem8s.agent_llm")
 
 
+def openai_timeout_seconds() -> int:
+    try:
+        return max(10, min(int(os.getenv("OPENAI_TIMEOUT_SECONDS", "35")), 120))
+    except Exception:
+        return 35
+
+
 def chat_json(system: str, user: str, temperature: float = 0.2) -> dict[str, Any] | None:
     key = os.getenv("OPENAI_API_KEY", "").strip()
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    timeout = openai_timeout_seconds()
     if not key:
         logger.warning("OpenAI generation skipped: OPENAI_API_KEY is not set")
         return None
@@ -30,7 +39,8 @@ def chat_json(system: str, user: str, temperature: float = 0.2) -> dict[str, Any
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=90) as response:
+        logger.info("OpenAI request started model=%s timeout=%ss", model, timeout)
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
             data = json.loads(raw)
             content = data["choices"][0]["message"]["content"]
@@ -39,9 +49,12 @@ def chat_json(system: str, user: str, temperature: float = 0.2) -> dict[str, Any
         body = exc.read().decode("utf-8", errors="replace")[:4000]
         logger.error("OpenAI HTTP error model=%s status=%s body=%s", model, exc.code, body)
         return None
+    except (TimeoutError, socket.timeout) as exc:
+        logger.error("OpenAI timeout model=%s timeout=%ss error=%s", model, timeout, exc)
+        return None
     except json.JSONDecodeError as exc:
         logger.error("OpenAI JSON parse error model=%s error=%s", model, exc)
         return None
     except Exception as exc:
-        logger.exception("OpenAI generation failed model=%s error=%s", model, exc)
+        logger.exception("OpenAI generation failed model=%s timeout=%ss error=%s", model, timeout, exc)
         return None
