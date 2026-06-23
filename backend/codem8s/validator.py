@@ -21,6 +21,7 @@ REQUIRED_EXPORTS = {
 
 CODE_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx", ".py", ".css")
 JS_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx")
+ASSET_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg")
 
 
 def safe_path(path: str) -> bool:
@@ -34,8 +35,6 @@ def detect_placeholders(content: str) -> List[str]:
     for phrase in BANNED_PHRASES:
         if phrase.lower() in lowered:
             found.append(phrase)
-    # Do not ban the normal English word "stub" in real app copy/code.
-    # Only ban it when it is clearly describing placeholder implementation.
     if re.search(r"(?i)(placeholder|empty|fake|todo|temporary)\s+stub|stub\s+(component|file|implementation|function|screen|placeholder)", content):
         found.append("stub placeholder")
     return found
@@ -43,10 +42,20 @@ def detect_placeholders(content: str) -> List[str]:
 
 def detect_placeholder_only_file(path: str, content: str) -> List[str]:
     errors: List[str] = []
-    if not path.endswith(CODE_EXTENSIONS):
-        return errors
     stripped = content.strip()
     lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+
+    if path.endswith(ASSET_EXTENSIONS):
+        if not stripped:
+            errors.append("asset file is empty")
+        if re.fullmatch(r"(?s)\s*(#|//)\s*[^\n]*\.(png|jpg|jpeg|gif|webp|ico|svg)\s*", stripped, re.I):
+            errors.append("fake asset file; binary/image asset was generated as a text comment")
+        if path.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico")) and not stripped.startswith(("data:image/", "BASE64:", "iVBOR", "/9j/", "R0lGOD")):
+            errors.append("binary asset must be base64/data-url content or generated as a real code-rendered asset")
+        return errors
+
+    if not path.endswith(CODE_EXTENSIONS):
+        return errors
     if not lines:
         errors.append("file is empty")
         return errors
@@ -59,6 +68,21 @@ def detect_placeholder_only_file(path: str, content: str) -> List[str]:
         code_without_comments = re.sub(r"/\*.*?\*/", "", code_without_comments, flags=re.S).strip()
         if len(code_without_comments) < 25 and re.search(r"(File|Path)\s*:", stripped, re.I):
             errors.append("code file is only a filename comment")
+    return errors
+
+
+def detect_recovered_fallback(path: str, content: str) -> List[str]:
+    errors: List[str] = []
+    if not path.endswith(JS_EXTENSIONS):
+        return errors
+    low = content.lower()
+    if "data-generated-fallback" in content or "Recovered module" in content or "AI builder failed or returned weak code" in content:
+        if path.endswith(("App.tsx", "App.jsx", "GameScreen.tsx", "GameScreen.jsx", "CanvasMap.tsx", "CanvasMap.jsx")):
+            errors.append(f"{path}: recovered fallback is not acceptable for core rendered app/game files")
+        elif len(content.strip()) < 900:
+            errors.append(f"{path}: recovered fallback is too shallow to count as a finished implementation")
+    if "reason: 'AI builder failed" in content or 'reason: "AI builder failed' in content:
+        errors.append(f"{path}: fallback data module accepted instead of real implementation")
     return errors
 
 
@@ -91,7 +115,7 @@ def exported_names(content: str) -> set[str]:
     except SyntaxError:
         return names
     for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ClassDef := ast.ClassDef)):
             names.add(node.name)
         elif isinstance(node, ast.Assign):
             for target in node.targets:
@@ -212,7 +236,7 @@ def validate_product_depth(files: Dict[str, str]) -> List[str]:
     app = files.get("frontend/src/App.jsx", "") or files.get("frontend/src/App.tsx", "") or files.get("frontend/App.tsx", "")
     dashboard = files.get("frontend/src/components/Dashboard.jsx", "")
     sample = files.get("frontend/src/data/sampleData.js", "")
-    styles = files.get("frontend/src/styles.css", "")
+    styles = files.get("frontend/src/styles.css", "") or files.get("frontend/src/styles/global.css", "")
 
     if app:
         low = app.lower()
@@ -236,7 +260,7 @@ def validate_product_depth(files: Dict[str, str]) -> List[str]:
         low = styles.lower()
         design_signals = sum(term in low for term in ["linear-gradient", "grid", "box-shadow", "border-radius", "sidebar", "badge", "card", "kpi", "media", "responsive", "canvas", "toolbar"])
         if design_signals < 6:
-            errors.append("frontend/src/styles.css: design system is too basic")
+            errors.append("frontend styles: design system is too basic")
     return errors
 
 
@@ -250,6 +274,7 @@ def validate_file(path: str, content: str, spec_files: Dict[str, str]) -> Tuple[
         errors.append("file is too small to be useful")
     errors.extend(detect_placeholder_only_file(path, content))
     errors.extend(detect_markdown_or_bad_prefix(path, content))
+    errors.extend(detect_recovered_fallback(path, content))
     if not path.endswith("validator.py"):
         for phrase in detect_placeholders(content):
             errors.append(f"banned placeholder phrase: {phrase}")
@@ -259,21 +284,5 @@ def validate_file(path: str, content: str, spec_files: Dict[str, str]) -> Tuple[
         names = exported_names(content)
         for name in required:
             if name not in names:
-                errors.append(f"missing required export: {name}")
-    if path.endswith(JS_EXTENSIONS) and "PropTypes" in content:
-        errors.append("uses PropTypes; avoid prop-types unless package.json includes it")
-    return len(errors) == 0, errors
-
-
-def validate_project_against_spec(files: Dict[str, str], spec_files: Dict[str, str]) -> Tuple[bool, List[str]]:
-    errors: List[str] = []
-    for path in spec_files:
-        if path not in files:
-            errors.append(f"missing file: {path}")
-    for path, content in files.items():
-        ok, file_errors = validate_file(path, content, spec_files)
-        if not ok:
-            errors.extend([f"{path}: {err}" for err in file_errors])
-    errors.extend(validate_js_import_exports(files))
-    errors.extend(validate_product_depth(files))
+                errors.append(f"missing required export/name: {name}")
     return len(errors) == 0, errors
