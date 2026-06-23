@@ -3,7 +3,8 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     CODEM8S_DATA_DIR=/data/codem8s \
-    CODEM8S_PREVIEW_DIR=/data/codem8s/previews
+    CODEM8S_PREVIEW_DIR=/data/codem8s/previews \
+    NODE_PATH=/usr/local/lib/node_modules
 
 WORKDIR /app
 
@@ -14,7 +15,8 @@ RUN apt-get update \
        libcairo2 libatspi2.0-0 fonts-liberation \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodeSource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && sed -i 's/nodeSource/nodesource/g' /etc/apt/sources.list.d/nodesource.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g npm@latest playwright \
