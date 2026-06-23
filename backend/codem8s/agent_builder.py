@@ -24,6 +24,10 @@ CSHARP_MARKERS = ["using UnityEngine", "MonoBehaviour", "GameObject", "Vector3",
 
 
 def expected_language(path: str) -> str:
+    if path.endswith(".tsx"):
+        return "tsx"
+    if path.endswith(".ts"):
+        return "typescript"
     if path.endswith(".jsx"):
         return "jsx"
     if path.endswith(".js"):
@@ -46,6 +50,10 @@ def js_has_jsx(code: str) -> bool:
 
 def language_instruction(path: str) -> str:
     lang = expected_language(path)
+    if lang == "tsx":
+        return "React TSX component file. JSX markup and TypeScript types are allowed. Export the component named in the topology when provided. Use valid TSX syntax."
+    if lang == "typescript":
+        return "Plain TypeScript module file. JSX markup is forbidden. Export only types, interfaces, functions, constants, classes, data, or hooks. Use valid TypeScript syntax."
     if lang == "jsx":
         return "React JSX component file. JSX markup is allowed. Export the component named in the topology when provided."
     if lang == "javascript":
@@ -81,12 +89,12 @@ def wrong_language_reason(path: str, code: str) -> str | None:
     low = code.lower()
     if "```" in code:
         return f"{path} contains markdown fences"
-    if lang in {"javascript", "jsx"}:
+    if lang in {"javascript", "jsx", "typescript", "tsx"}:
         for marker in CSHARP_MARKERS:
             if marker.lower() in low:
                 return f"{path} contains wrong-language marker: {marker}"
-        if lang == "javascript" and js_has_jsx(code):
-            return f"{path} is .js and must not contain JSX"
+        if lang in {"javascript", "typescript"} and js_has_jsx(code):
+            return f"{path} is a module file and must not contain JSX"
     if lang == "python" and ("import React" in code or "export default" in code):
         return f"{path} must be Python, but contains frontend syntax"
     if lang == "css" and ("export default" in code or "function " in code):
@@ -97,24 +105,22 @@ def wrong_language_reason(path: str, code: str) -> str | None:
 def is_weak_code(path: str, code: str) -> bool:
     stripped = code.strip()
     low = stripped.lower()
-    if len(stripped) < 220 and path.endswith((".jsx", ".js", ".py", ".css")):
+    if len(stripped) < 220 and path.endswith((".jsx", ".js", ".tsx", ".ts", ".py", ".css")):
         return True
     if any(term in low for term in BASIC_BANNED):
         return True
-    if path.endswith(".jsx"):
-        # App/screen/component files must look like a real product, not a single heading and paragraph.
+    if path.endswith((".jsx", ".tsx")):
         jsx_tags = len(re.findall(r"<\w+", stripped))
-        has_metrics = bool(re.search(r"\b(total|status|score|rate|count|progress|upcoming|recent|trend|activity|summary)\b", low))
-        has_cards = bool(re.search(r"card|panel|sidebar|dashboard|grid|metric|stat|toolbar", low))
+        has_metrics = bool(re.search(r"\b(total|status|score|rate|count|progress|upcoming|recent|trend|activity|summary|resource|map|vehicle|route|budget|time)\b", low))
+        has_cards = bool(re.search(r"card|panel|sidebar|dashboard|grid|metric|stat|toolbar|canvas|map|hud", low))
         has_lists = stripped.count(".map(") + stripped.count("map((")
-        if jsx_tags < 10 and "App" in path:
+        if jsx_tags < 10 and ("App" in path or "Screen" in path or "Scene" in path):
             return True
-        if ("dashboard" in low or "app" in path.lower() or "scene" in path.lower() or "page" in path.lower()) and not (has_metrics and has_cards):
+        if ("dashboard" in low or "app" in path.lower() or "scene" in path.lower() or "screen" in path.lower() or "page" in path.lower()) and not (has_metrics and has_cards):
             return True
         if "dashboard" in low and has_lists < 1:
             return True
     if path.endswith("styles.css") or path.endswith(".css"):
-        # Avoid plain white CRUD styling. Require modern product design primitives.
         css_low = low
         must_have = ["grid", "border-radius", "box-shadow", "linear-gradient", "var("]
         if sum(1 for term in must_have if term in css_low) < 3:
