@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import PurePosixPath
 from typing import Any
 
 from .agent_llm import chat_json
 from .deep_game_blueprint import deep_game_blueprint, deep_game_paths, is_deep_game_request
 from .models import ProjectSpec
+
+SRC_DIRS = {"components", "routes", "screens", "scenes", "pages", "hooks", "store", "stores", "types", "utils", "systems", "entities", "game", "data", "services", "state"}
+ROOT_FRONTEND_FILES = {"package.json", "index.html", "vite.config.js", "vite.config.ts", "tsconfig.json", "tsconfig.node.json"}
 
 
 def slug(text: str) -> str:
@@ -20,6 +24,62 @@ def title_from_idea(idea: str) -> str:
 def safe_component_name(name: str) -> str:
     raw = re.sub(r"[^a-zA-Z0-9]+", " ", name).title().replace(" ", "")
     return raw or "Generated"
+
+
+def canonical_frontend_path(path: str) -> str:
+    path = str(path).strip().replace("\\", "/").lstrip("/")
+    if not path:
+        return path
+    if path.startswith("src/"):
+        path = "frontend/" + path
+    if not path.startswith("frontend/"):
+        return path
+    rest = path.removeprefix("frontend/")
+    if rest in ROOT_FRONTEND_FILES:
+        return "frontend/" + rest
+    if rest.startswith("src/"):
+        return "frontend/" + rest
+    first = rest.split("/", 1)[0]
+    if rest in {"main.jsx", "main.tsx", "App.jsx", "App.tsx", "styles.css"} or first in SRC_DIRS:
+        return "frontend/src/" + rest
+    return "frontend/" + rest
+
+
+def canonical_path(path: str) -> str:
+    path = str(path).strip().replace("\\", "/").lstrip("/")
+    if path.startswith("frontend/") or path.startswith("src/"):
+        return canonical_frontend_path(path)
+    if path.startswith("backend/"):
+        return path
+    return path
+
+
+def normalize_blueprint_paths(bp: dict[str, Any]) -> dict[str, Any]:
+    for key in ["frontend_files", "backend_files"]:
+        normalized = []
+        for path in bp.get(key) or []:
+            if not isinstance(path, str):
+                continue
+            if key == "frontend_files" and not path.startswith(("frontend/", "src/")):
+                path = "frontend/" + path.lstrip("/")
+            if key == "backend_files" and not path.startswith("backend/"):
+                path = "backend/" + path.lstrip("/")
+            normalized.append(canonical_path(path))
+        bp[key] = list(dict.fromkeys(normalized))
+
+    topo = bp.get("dependency_topology")
+    if isinstance(topo, dict):
+        new_topo: dict[str, Any] = {}
+        for path, meta in topo.items():
+            new_path = canonical_path(path)
+            if isinstance(meta, dict):
+                meta = dict(meta)
+                imports = meta.get("imports") or []
+                if isinstance(imports, list):
+                    meta["imports"] = [canonical_path(str(item)) for item in imports if isinstance(item, str)]
+            new_topo[new_path] = meta
+        bp["dependency_topology"] = new_topo
+    return bp
 
 
 def fallback_app_plan(idea: str, pages: list[str], entities: list[dict[str, Any]]) -> dict[str, Any]:
@@ -93,6 +153,7 @@ def plan_with_api(idea: str) -> dict[str, Any] | None:
 You are Codem8s Product Architect. Return JSON only.
 Required keys: app_name, goal, kind, runtime, needs_backend, pages, entities, systems, app_plan, frontend_files, backend_files, dependency_topology, notes.
 Plan real products, not placeholder scaffolds.
+For React/Vite frontends, all source files must live under frontend/src/. Use frontend/src/main.tsx and frontend/src/App.tsx for TypeScript React apps, or frontend/src/main.jsx and frontend/src/App.jsx for JavaScript React apps. Never put App.tsx or main.tsx directly under frontend/.
 For games, plan real gameplay systems, entities, UI/HUD, controls, progression, and rendering.
 If the user asks for many files, store/entities/systems/components/screens, produce a deep architecture, not a tiny scaffold.
 """
@@ -101,7 +162,7 @@ If the user asks for many files, store/entities/systems/components/screens, prod
 
 def normalize_blueprint(raw: dict[str, Any] | None, idea: str) -> dict[str, Any]:
     if is_deep_game_request(idea):
-        return deep_game_blueprint(idea)
+        return normalize_blueprint_paths(deep_game_blueprint(idea))
     fallback = fallback_blueprint(idea)
     bp = raw if isinstance(raw, dict) else fallback
     for key, value in fallback.items():
@@ -121,7 +182,7 @@ def normalize_blueprint(raw: dict[str, Any] | None, idea: str) -> dict[str, Any]
         bp["needs_backend"] = False
         if str(bp.get("runtime", "")).lower() in {"unity", "godot"}:
             bp["runtime"] = "react-vite-canvas"
-    return bp
+    return normalize_blueprint_paths(bp)
 
 
 def blueprint_from_idea(idea: str, use_api: bool = True) -> dict[str, Any]:
@@ -132,18 +193,21 @@ def blueprint_from_spec(spec: ProjectSpec) -> dict[str, Any]:
     for entry in reversed(spec.change_log):
         if entry.startswith("BLUEPRINT_JSON:"):
             try:
-                return json.loads(entry.removeprefix("BLUEPRINT_JSON:"))
+                return normalize_blueprint_paths(json.loads(entry.removeprefix("BLUEPRINT_JSON:")))
             except json.JSONDecodeError:
                 pass
     return blueprint_from_idea(spec.goal, use_api=False)
 
 
-def add(files: dict[str, str], path: str, purpose: str) -> None:
+def add(files: dict[str, str], path: str, purpose: str, overwrite: bool = True) -> None:
     if path and isinstance(path, str):
-        files[path] = purpose
+        path = canonical_path(path)
+        if overwrite or path not in files:
+            files[path] = purpose
 
 
 def topo_role(bp: dict[str, Any], path: str, fallback: str) -> str:
+    path = canonical_path(path)
     topo = bp.get("dependency_topology") or {}
     meta = topo.get(path) if isinstance(topo, dict) else None
     app_plan = bp.get("app_plan") if isinstance(bp.get("app_plan"), dict) else {}
@@ -156,21 +220,25 @@ def topo_role(bp: dict[str, Any], path: str, fallback: str) -> str:
 def add_blueprint_requested_files(files: dict[str, str], bp: dict[str, Any]) -> None:
     for path in bp.get("frontend_files") or []:
         if isinstance(path, str):
-            if not path.startswith("frontend/"):
+            if not path.startswith(("frontend/", "src/")):
                 path = "frontend/" + path.lstrip("/")
+            path = canonical_path(path)
             add(files, path, topo_role(bp, path, "blueprint requested frontend file"))
     for path in bp.get("backend_files") or []:
         if isinstance(path, str):
             if not path.startswith("backend/"):
                 path = "backend/" + path.lstrip("/")
+            path = canonical_path(path)
             add(files, path, topo_role(bp, path, "blueprint requested backend file"))
 
 
-def add_topology_paths(files: dict[str, str], bp: dict[str, Any], paths: list[tuple[str, str, list[str], list[str]]]) -> None:
+def add_topology_paths(files: dict[str, str], bp: dict[str, Any], paths: list[tuple[str, str, list[str], list[str]]], overwrite: bool = False) -> None:
     topo = bp.setdefault("dependency_topology", {})
     for path, role, imports, exports in paths:
-        topo[path] = {"imports": imports, "exports": exports, "role": role}
-        add(files, path, topo_role(bp, path, role))
+        path = canonical_path(path)
+        imports = [canonical_path(item) for item in imports]
+        topo.setdefault(path, {"imports": imports, "exports": exports, "role": role})
+        add(files, path, topo_role(bp, path, role), overwrite=overwrite)
 
 
 def tower_defense_paths() -> list[tuple[str, str, list[str], list[str]]]:
@@ -194,13 +262,28 @@ def tower_defense_paths() -> list[tuple[str, str, list[str], list[str]]]:
     ]
 
 
+def has_ai_entry_files(files: dict[str, str]) -> bool:
+    paths = set(files)
+    has_entry = "frontend/src/main.tsx" in paths or "frontend/src/main.jsx" in paths
+    has_app = "frontend/src/App.tsx" in paths or "frontend/src/App.jsx" in paths
+    return has_entry and has_app
+
+
 def add_game_architecture_files(files: dict[str, str], bp: dict[str, Any]) -> None:
+    if has_ai_entry_files(files):
+        # AI supplied a complete entry/app architecture. Only fill universal support files.
+        add_topology_paths(files, bp, [
+            ("frontend/package.json", "frontend package", [], []),
+            ("frontend/index.html", "html entry", [], []),
+            ("README.md", "instructions", [], []),
+        ], overwrite=False)
+        return
     spec_text = json.dumps(bp).lower()
     if is_deep_game_request(spec_text):
-        add_topology_paths(files, bp, deep_game_paths())
+        add_topology_paths(files, bp, deep_game_paths(), overwrite=False)
         return
     if "tower defense" in spec_text:
-        add_topology_paths(files, bp, tower_defense_paths())
+        add_topology_paths(files, bp, tower_defense_paths(), overwrite=False)
         return
     add_topology_paths(files, bp, [
         ("frontend/package.json", "frontend package", [], []),
@@ -216,10 +299,18 @@ def add_game_architecture_files(files: dict[str, str], bp: dict[str, Any]) -> No
         ("frontend/src/scenes/GameOver.jsx", "game over", [], ["GameOver"]),
         ("frontend/src/App.jsx", "root router", ["frontend/src/scenes/MainMenu.jsx", "frontend/src/game/GameCanvas.jsx", "frontend/src/scenes/GameOver.jsx"], ["App"]),
         ("frontend/src/main.jsx", "react entry", ["frontend/src/App.jsx", "frontend/src/styles.css"], []),
-    ])
+    ], overwrite=False)
 
 
 def add_business_architecture_files(files: dict[str, str], bp: dict[str, Any]) -> None:
+    if has_ai_entry_files(files):
+        add_topology_paths(files, bp, [
+            ("frontend/package.json", "frontend package", [], []),
+            ("frontend/index.html", "html entry", [], []),
+            ("README.md", "instructions", [], []),
+            ("backend/requirements.txt", "backend dependencies", [], []),
+        ], overwrite=False)
+        return
     paths: list[tuple[str, str, list[str], list[str]]] = [
         ("backend/requirements.txt", "backend dependencies", [], []),
         ("backend/store.py", "persistence and seeded domain data", [], ["store"]),
@@ -242,10 +333,11 @@ def add_business_architecture_files(files: dict[str, str], bp: dict[str, Any]) -
         ("frontend/src/styles.css", "responsive design system", [], []),
         ("README.md", "instructions", [], []),
     ])
-    add_topology_paths(files, bp, paths)
+    add_topology_paths(files, bp, paths, overwrite=False)
 
 
 def files_for_blueprint(bp: dict[str, Any]) -> dict[str, str]:
+    bp = normalize_blueprint_paths(bp)
     files: dict[str, str] = {}
     add_blueprint_requested_files(files, bp)
     if bp.get("kind") in {"game", "deep-browser-game"} or bp.get("needs_backend") is False:
