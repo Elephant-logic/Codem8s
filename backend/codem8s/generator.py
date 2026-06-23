@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from .models import ProjectSpec
@@ -26,6 +27,15 @@ def should_use_api_builder(path: str, use_ai: bool) -> bool:
     return path.endswith(API_FIRST_EXTENSIONS)
 
 
+def _spec_uses_tsx(spec: ProjectSpec) -> bool:
+    return any(path.endswith((".ts", ".tsx")) for path in spec.files)
+
+
+def _spec_uses_router(spec: ProjectSpec) -> bool:
+    text = (spec.goal + "\n" + json.dumps(spec.files)).lower()
+    return "route" in text or "router" in text or "frontend/src/routes" in text or "frontend/routes" in text
+
+
 def fallback_file(path: str, spec: ProjectSpec) -> str:
     rendered = render_file(path, spec)
     if rendered is not None:
@@ -35,7 +45,13 @@ def fallback_file(path: str, spec: ProjectSpec) -> str:
         return "fastapi==0.111.0\nuvicorn[standard]==0.30.1\npydantic==2.7.4\npython-dotenv==1.0.1\n"
 
     if path == "frontend/package.json":
-        return '{"scripts":{"dev":"vite --host 0.0.0.0","build":"vite build","preview":"vite preview"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","react":"latest","react-dom":"latest"},"devDependencies":{}}'
+        deps = {"@vitejs/plugin-react": "latest", "vite": "latest", "react": "latest", "react-dom": "latest"}
+        dev_deps = {}
+        if _spec_uses_tsx(spec):
+            deps.update({"typescript": "latest", "@types/react": "latest", "@types/react-dom": "latest"})
+        if _spec_uses_router(spec):
+            deps["react-router-dom"] = "latest"
+        return json.dumps({"scripts": {"dev": "vite --host 0.0.0.0", "build": "vite build", "preview": "vite preview"}, "dependencies": deps, "devDependencies": dev_deps}, separators=(",", ":"))
 
     if path == "frontend/index.html":
         if "frontend/src/main.tsx" in spec.files or "frontend/main.tsx" in spec.files:
