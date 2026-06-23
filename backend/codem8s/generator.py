@@ -7,7 +7,8 @@ from .agent_blueprint import build_spec, apply_instruction
 from .factory_renderer import render_file
 from .agent_builder import build_file_with_api, is_weak_code
 
-API_FIRST_EXTENSIONS = (".jsx", ".js", ".css", ".py")
+API_FIRST_EXTENSIONS = (".jsx", ".js", ".tsx", ".ts", ".css", ".py")
+CODE_EXTENSIONS = (".jsx", ".js", ".tsx", ".ts", ".css", ".py")
 
 
 def should_use_api_builder(path: str, use_ai: bool) -> bool:
@@ -17,6 +18,7 @@ def should_use_api_builder(path: str, use_ai: bool) -> bool:
         "frontend/package.json",
         "frontend/index.html",
         "frontend/src/main.jsx",
+        "frontend/src/main.tsx",
         "backend/requirements.txt",
         "README.md",
     }:
@@ -36,15 +38,23 @@ def fallback_file(path: str, spec: ProjectSpec) -> str:
         return '{"scripts":{"dev":"vite --host 0.0.0.0","build":"vite build","preview":"vite preview"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","react":"latest","react-dom":"latest"},"devDependencies":{}}'
 
     if path == "frontend/index.html":
+        if "frontend/src/main.tsx" in spec.files or "frontend/main.tsx" in spec.files:
+            return '<div id="root"></div><script type="module" src="/src/main.tsx"></script>'
         return '<div id="root"></div><script type="module" src="/src/main.jsx"></script>'
 
     if path == "frontend/src/main.jsx":
         return "import React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport App from './App.jsx';\nimport './styles.css';\ncreateRoot(document.getElementById('root')).render(<App />);\n"
 
+    if path == "frontend/src/main.tsx":
+        return "import React from 'react';\nimport { createRoot } from 'react-dom/client';\nimport App from './App';\nimport './styles.css';\n\ncreateRoot(document.getElementById('root') as HTMLElement).render(<React.StrictMode><App /></React.StrictMode>);\n"
+
     if path == "README.md":
         return f"# {spec.app_name}\n\n{spec.goal}\n\n## Run\n\n```bash\ncd frontend\nnpm install\nnpm run dev\n```\n\n## Build\n\n```bash\ncd frontend\nnpm run build\n```\n"
 
-    return f"# File: {path}\n"
+    if path.endswith(CODE_EXTENSIONS):
+        raise RuntimeError(f"No implementation generated for code file {path}; refusing to write filename-only placeholder")
+
+    return f"# {path}\n"
 
 
 def generate_file(path: str, spec: ProjectSpec, use_ai: bool = True, previous_errors: Optional[list[str]] = None) -> str:
@@ -52,5 +62,7 @@ def generate_file(path: str, spec: ProjectSpec, use_ai: bool = True, previous_er
         built = build_file_with_api(path, spec, previous_errors)
         if built and not is_weak_code(path, built):
             return built
+        if path.endswith(CODE_EXTENSIONS):
+            raise RuntimeError(f"AI builder failed to produce valid implementation for {path}")
 
     return fallback_file(path, spec)
