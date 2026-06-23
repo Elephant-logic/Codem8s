@@ -62,23 +62,33 @@ def _planned_package_dependencies(spec: ProjectSpec) -> dict[str, str]:
     return deps
 
 
+def _safe_identifier(value: str, fallback: str = "GeneratedModule") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "", value)
+    if not cleaned:
+        cleaned = fallback
+    if cleaned[0].isdigit():
+        cleaned = fallback + cleaned
+    return cleaned
+
+
 def _export_names_for_path(path: str, spec: ProjectSpec) -> list[str]:
     purpose = spec.files.get(path, "")
     match = re.search(r"exports=\[([^\]]*)\]", purpose)
     if match:
-        names = [part.strip().strip("'\"") for part in match.group(1).split(",") if part.strip().strip("'\"")]
+        names = [_safe_identifier(part.strip().strip("'\""), "generated") for part in match.group(1).split(",") if part.strip().strip("'\"")]
         if names:
             return names
     stem = PurePosixPath(path).stem
     if path.endswith((".jsx", ".tsx")):
-        return [re.sub(r"[^A-Za-z0-9_]", "", stem[:1].upper() + stem[1:]) or "GeneratedComponent"]
+        return [_safe_identifier(stem[:1].upper() + stem[1:], "GeneratedComponent")]
     return []
 
 
 def resilient_code_fallback(path: str, spec: ProjectSpec, reason: str = "AI generation failed") -> str:
-    name = (_export_names_for_path(path, spec) or [re.sub(r"[^A-Za-z0-9_]", "", PurePosixPath(path).stem) or "generated"])[0]
+    name = (_export_names_for_path(path, spec) or [_safe_identifier(PurePosixPath(path).stem, "generated")])[0]
     app_name = spec.app_name.replace("'", "")
     goal = spec.goal.replace("`", "").replace("${", "")[:500]
+    safe_reason = reason.replace("'", "").replace("\n", " ")[:200]
 
     if path.endswith(".css"):
         return """
@@ -128,26 +138,31 @@ export default {name};
 """
 
     if path.endswith((".ts", ".js")):
-        exports = _export_names_for_path(path, spec)
-        if not exports:
-            exports = [name]
-        lines = [f"export const {export_name} = {{", f"  name: '{export_name}',", "  status: 'ready',", f"  reason: '{reason.replace("'", '')}',", "  updatedAt: new Date().toISOString(),", "  records: []", "};"] for export_name in exports[:8]]
+        exports = _export_names_for_path(path, spec) or [name]
         flat: list[str] = []
-        for block in lines:
-            flat.extend(block)
-            flat.append("")
+        for export_name in exports[:8]:
+            flat.extend([
+                f"export const {export_name} = {{",
+                f"  name: '{export_name}',",
+                "  status: 'ready',",
+                f"  reason: '{safe_reason}',",
+                "  updatedAt: new Date().toISOString(),",
+                "  records: []",
+                "};",
+                "",
+            ])
         flat.append("export function createRecoveredState(seed = {}) {")
         flat.append("  return { ...seed, recovered: true, updatedAt: new Date().toISOString() };")
         flat.append("}")
         return "\n".join(flat).strip() + "\n"
 
     if path.endswith(".py"):
-        func = re.sub(r"[^a-zA-Z0-9_]", "_", PurePosixPath(path).stem)
+        func = _safe_identifier(PurePosixPath(path).stem, "generated_module").lower()
         return f"""from __future__ import annotations
 
 
 def {func}_status() -> dict:
-    return {{"module": "{path}", "status": "ready", "reason": "{reason.replace('"', '')}"}}
+    return {{"module": "{path}", "status": "ready", "reason": "{safe_reason}"}}
 """
 
     raise RuntimeError(f"No implementation generated for code file {path}; refusing to write filename-only placeholder")
