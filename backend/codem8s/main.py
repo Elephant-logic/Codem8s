@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .agent_build_repair import real_build_repair_project
 from .agent_memory import MemoryCreateRequest, create_memory, list_memory, search_memory
@@ -18,8 +18,9 @@ from .agent_team import TeamRunRequest, create_team_run, finish_step, get_team_r
 from .consistency_repair import deterministic_consistency_repair
 from .exporter import export_project
 from .generator import apply_instruction, build_spec, generate_file
-from .models import BuildRequest, BuildState, ChangeRequest, FileSpec
+from .models import BuildRequest, BuildState, ChangeRequest, FileSpec, ProjectSpec
 from .product_quality import quality_as_dict, quality_repair_prompt, score_product_quality
+from .project_importer import build_topology, describe_path_role, inspect_file, refactor_file_with_ai
 from .project_store import load_all_projects, load_project, save_project
 from .sandbox import ensure_preview_root, sandbox_logs, sandbox_status, start_sandbox, stop_sandbox
 from .settings import SettingsIn, SettingsOut, save_settings, settings_status
@@ -47,6 +48,17 @@ class SnapshotRequest(BaseModel):
 class AutonomousRequest(BaseModel):
     instruction: str = "Work through the project until it runs. Use snapshots, sandbox logs, dependency topology, and repair connected files."
     max_rounds: int = 10
+
+
+class ImportFilesRequest(BaseModel):
+    name: str = "Imported Project"
+    files: dict[str, str] = Field(default_factory=dict)
+
+
+class WorkbenchFileRequest(BaseModel):
+    path: str
+    instruction: str = "Refactor this file safely using its imports, dependents, and exports."
+    content: str | None = None
 
 
 def dump_model(model):
@@ -80,6 +92,14 @@ def current_contents(state: BuildState) -> dict[str, str]:
     return {path: item.content for path, item in state.files.items() if item.content}
 
 
+def refresh_imported_topology(state: BuildState) -> None:
+    files = current_contents(state)
+    topology = build_topology(files)
+    state.spec.files = {p: describe_path_role(p, c) for p, c in files.items()}
+    state.spec.change_log = [entry for entry in state.spec.change_log if not entry.startswith("TOPOLOGY_JSON:")]
+    state.spec.change_log.append("TOPOLOGY_JSON:" + json.dumps(topology, separators=(",", ":")))
+
+
 def learn_from_errors(state: BuildState, errors: list[str], category: str = "build_failure") -> None:
     for error in errors[:8]:
         text = str(error)[-2000:]
@@ -94,16 +114,7 @@ def learn_from_errors(state: BuildState, errors: list[str], category: str = "bui
         if "dashboard" in low or "shallow" in low:
             tags += ["dashboard", "quality"]
         try:
-            create_memory(MemoryCreateRequest(
-                project_id=state.project_id,
-                category=category,
-                pattern=text.split("\n", 1)[0][:180],
-                symptom=text,
-                fix="Search memory, repair the connected dependency/product chain, then rerun validation/build.",
-                lesson=f"Observed in {state.spec.app_name}: {text}",
-                tags=sorted(set(tags)),
-                success=False,
-            ))
+            create_memory(MemoryCreateRequest(project_id=state.project_id, category=category, pattern=text.split("\n", 1)[0][:180], symptom=text, fix="Search memory, repair the connected dependency/product chain, then rerun validation/build.", lesson=f"Observed in {state.spec.app_name}: {text}", tags=sorted(set(tags)), success=False))
         except Exception as exc:
             state.logs.append(f"Agent memory skipped: {exc}")
 
@@ -124,9 +135,6 @@ def apply_repaired_contents(state: BuildState, repaired: dict[str, str]) -> int:
         if item.content == content:
             continue
         ok, errors = validate_file(path, content, state.spec.files)
-        # Keep rejected repair content too. The next real build needs the actual file
-        # contents so it can surface the next concrete compiler/runtime error instead
-        # of getting stuck regenerating the same path from scratch.
         item.content = content
         if ok:
             item.status, item.errors = "valid", []
@@ -151,23 +159,11 @@ def deterministic_project_repair(state: BuildState) -> int:
 
 def product_quality_check(state: BuildState) -> bool:
     score = score_product_quality(current_contents(state))
-    state.logs.append(
-        f"Product quality score {score.total}/100 "
-        f"(architecture {score.product_architecture}, ui {score.ui_depth}, workflow {score.workflow_depth}, data {score.data_richness}, design {score.design_system})"
-    )
+    state.logs.append(f"Product quality score {score.total}/100 (architecture {score.product_architecture}, ui {score.ui_depth}, workflow {score.workflow_depth}, data {score.data_richness}, design {score.design_system})")
     if score.issues:
         state.logs.extend([f"Product quality issue: {issue}" for issue in score.issues[:10]])
         try:
-            create_memory(MemoryCreateRequest(
-                project_id=state.project_id,
-                category="product_quality",
-                pattern="product quality failed",
-                symptom="; ".join(score.issues),
-                fix=quality_repair_prompt(score),
-                lesson=f"Quality score {score.total}/100 for {state.spec.app_name}",
-                tags=["quality", "ui", "product"],
-                success=False,
-            ))
+            create_memory(MemoryCreateRequest(project_id=state.project_id, category="product_quality", pattern="product quality failed", symptom="; ".join(score.issues), fix=quality_repair_prompt(score), lesson=f"Quality score {score.total}/100 for {state.spec.app_name}", tags=["quality", "ui", "product"], success=False))
         except Exception:
             pass
     return score.total >= QUALITY_PASS_SCORE and not score.issues
@@ -193,7 +189,6 @@ def build_one_file(state: BuildState) -> bool:
         previous.append("Relevant agent memory:\n" + hints)
     content = generate_file(item.path, state.spec, use_ai=state.use_ai, previous_errors=previous)
     ok, errors = validate_file(item.path, content, state.spec.files)
-    # Preserve rejected content so the dependency-aware build repair can inspect it.
     item.content = content
     item.errors = errors
     item.status = "valid" if ok else "rejected"
@@ -221,9 +216,7 @@ def fill_missing_files(state: BuildState, limit: int = 80) -> None:
             rejection_counts[key] = rejection_counts.get(key, 0) + 1
             if rejection_counts[key] >= FILE_RETRY_CAP:
                 item.status = "needs_repair"
-                state.logs.append(
-                    f"Generation retry cap hit for {item.path}; handing concrete rejected content/errors to dependency-aware repair"
-                )
+                state.logs.append(f"Generation retry cap hit for {item.path}; handing concrete rejected content/errors to dependency-aware repair")
     if _generatable_pending_files(state):
         state.logs.append("Generation step limit reached; moving to repair/build with available contents")
     state.status = "needs_repair"
@@ -373,6 +366,12 @@ def project_graph(state: BuildState) -> dict:
             except Exception:
                 topology = {}
             break
+        if entry.startswith("TOPOLOGY_JSON:"):
+            try:
+                topology = json.loads(entry.removeprefix("TOPOLOGY_JSON:"))
+            except Exception:
+                topology = {}
+            break
     nodes, edges = [], []
     for path, item in state.files.items():
         meta = topology.get(path, {}) if isinstance(topology, dict) else {}
@@ -390,10 +389,11 @@ def timeline_for(state: BuildState) -> dict:
         lower = line.lower(); kind = "log"; title = "Log"
         if "product quality" in lower: kind, title = "quality", "Product quality"
         elif "selected agents" in lower or "agent team" in lower or "team step" in lower: kind, title = "team", "Agent team"
-        elif "spec locked" in lower: kind, title = "plan", "Blueprint/spec locked"
+        elif "spec locked" in lower or "imported" in lower: kind, title = "plan", "Blueprint/spec locked"
         elif line.startswith("Accepted "): kind, title = "file", "File accepted"
         elif line.startswith("Rejected "): kind, title = "error", "File rejected"
         elif "retry cap hit" in lower: kind, title = "repair", "Handed to repair"
+        elif "workbench" in lower or "refactor" in lower: kind, title = "repair", "Workbench edit"
         elif "agent memory" in lower: kind, title = "memory", "Agent memory"
         elif "agent" in lower: kind, title = "agent", "Agent activity"
         elif "deterministic consistency" in lower: kind, title = "repair", "Consistency repair"
@@ -484,8 +484,7 @@ def team_run_get(team_run_id: str):
     return run
 
 @app.get("/projects/{project_id}/team/runs")
-def project_team_runs(project_id: str, limit: int = 50):
-    return {"project_id": project_id, "team_runs": [dump_model(run) for run in list_team_runs(project_id, limit=limit)]}
+def project_team_runs(project_id: str, limit: int = 50): return {"project_id": project_id, "team_runs": [dump_model(run) for run in list_team_runs(project_id, limit=limit)]}
 
 @app.post("/projects/{project_id}/team/run")
 def project_team_run(project_id: str, req: TeamRunRequest): return run_agent_team(get_project(project_id), req)
@@ -506,6 +505,59 @@ def create_project(req: BuildRequest) -> BuildState:
     remember_agent_result(specialist, state.project_id, f"Created project from idea: {req.idea}")
     state.logs.append(f"Agent assigned: {specialist.name}")
     return remember(state)
+
+@app.post("/projects/import/files")
+def import_existing_files(req: ImportFilesRequest) -> BuildState:
+    cleaned = {p: c for p, c in req.files.items() if isinstance(p, str) and isinstance(c, str) and p.strip() and not p.startswith("/") and ".." not in p.split("/")}
+    if not cleaned:
+        raise HTTPException(400, "No readable source files supplied")
+    spec = ProjectSpec(app_name=req.name or "Imported Project", goal="Imported existing codebase for AI-assisted inspection, editing, refactoring, build repair, and export.", stack="imported-codebase", features=["Imported project", "Topology", "AI file edit", "Refactor"], files={p: describe_path_role(p, c) for p, c in cleaned.items()}, change_log=["IMPORTED_FILES", "TOPOLOGY_JSON:" + json.dumps(build_topology(cleaned), separators=(",", ":"))])
+    state = BuildState(project_id=str(uuid4()), use_ai=True, spec=spec, files={p: FileSpec(path=p, purpose=describe_path_role(p, c), status="valid", content=c) for p, c in cleaned.items()}, logs=[f"Imported {len(cleaned)} files into workbench", "Topology built from source imports"], status="complete")
+    return remember(state)
+
+@app.get("/projects/{project_id}/files/{path:path}/inspect")
+def inspect_project_file(project_id: str, path: str):
+    state = get_project(project_id)
+    try:
+        return inspect_file(current_contents(state), path)
+    except KeyError:
+        raise HTTPException(404, "File not found")
+
+@app.post("/projects/{project_id}/files/save")
+def save_project_file(project_id: str, req: WorkbenchFileRequest) -> BuildState:
+    state = get_project(project_id)
+    if req.path not in state.files:
+        raise HTTPException(404, "File not found")
+    content = req.content if req.content is not None else state.files[req.path].content
+    state.files[req.path].content = content
+    state.files[req.path].purpose = describe_path_role(req.path, content)
+    ok, errors = validate_file(req.path, content, state.spec.files)
+    state.files[req.path].status = "valid" if ok else "rejected"
+    state.files[req.path].errors = errors
+    refresh_imported_topology(state)
+    state.logs.append(f"Workbench saved {req.path}")
+    snap(state, f"workbench saved {req.path}")
+    return remember(state)
+
+@app.post("/projects/{project_id}/files/refactor")
+def refactor_project_file(project_id: str, req: WorkbenchFileRequest) -> dict:
+    state = get_project(project_id)
+    if req.path not in state.files:
+        raise HTTPException(404, "File not found")
+    if req.content is not None:
+        state.files[req.path].content = req.content
+    state.logs.append(f"Workbench AI refactor requested for {req.path}: {req.instruction}")
+    replacement = refactor_file_with_ai(current_contents(state), req.path, req.instruction)
+    state.files[req.path].content = replacement
+    state.files[req.path].purpose = describe_path_role(req.path, replacement)
+    ok, errors = validate_file(req.path, replacement, state.spec.files)
+    state.files[req.path].status = "valid" if ok else "rejected"
+    state.files[req.path].errors = errors
+    refresh_imported_topology(state)
+    state.logs.append(f"Workbench AI refactored {req.path}")
+    snap(state, f"workbench ai refactor {req.path}")
+    remember(state)
+    return {"project": state, "file": state.files[req.path], "inspection": inspect_file(current_contents(state), req.path)}
 
 @app.post("/projects/{project_id}/agents/run")
 def project_agent_run(project_id: str, req: AgentRunRequest): return run_agent_on_state(get_project(project_id), req)
@@ -529,26 +581,21 @@ def change_project(project_id: str, req: ChangeRequest) -> BuildState:
     return remember(state)
 
 @app.post("/projects/{project_id}/build-next")
-def build_next(project_id: str) -> BuildState:
-    state = get_project(project_id); build_one_file(state); return remember(state)
+def build_next(project_id: str) -> BuildState: state = get_project(project_id); build_one_file(state); return remember(state)
 
 @app.post("/projects/{project_id}/build-all")
 def build_all(project_id: str) -> BuildState:
     state = get_project(project_id)
-    if state.status == "paused":
-        state.logs.append("Resume before building all"); return remember(state)
+    if state.status == "paused": state.logs.append("Resume before building all"); return remember(state)
     snap(state, "before build all")
     fill_missing_files(state, MAX_BUILD_ALL_STEPS)
     if state.status in {"complete", "needs_repair"}:
-        snap(state, "files generated")
-        repair_whole_project(state)
-        mark_validity(state, real_build_check_and_repair(state))
+        snap(state, "files generated"); repair_whole_project(state); mark_validity(state, real_build_check_and_repair(state))
     snap(state, "after build all")
     return remember(state)
 
 @app.post("/projects/{project_id}/pause")
-def pause_project(project_id: str) -> BuildState:
-    state = get_project(project_id); state.status = "paused"; state.logs.append("Paused"); return remember(state)
+def pause_project(project_id: str) -> BuildState: state = get_project(project_id); state.status = "paused"; state.logs.append("Paused"); return remember(state)
 
 @app.post("/projects/{project_id}/resume")
 def resume_project(project_id: str) -> BuildState:
@@ -558,18 +605,14 @@ def resume_project(project_id: str) -> BuildState:
 
 @app.post("/projects/{project_id}/validate")
 def validate_project(project_id: str) -> BuildState:
-    state = get_project(project_id); snap(state, "before validate")
-    repair_whole_project(state); mark_validity(state, real_build_check_and_repair(state)); snap(state, "after validate")
-    return remember(state)
+    state = get_project(project_id); snap(state, "before validate"); repair_whole_project(state); mark_validity(state, real_build_check_and_repair(state)); snap(state, "after validate"); return remember(state)
 
 @app.post("/projects/{project_id}/autonomous")
 def autonomous_project(project_id: str, req: AutonomousRequest):
-    state = get_project(project_id); result = autonomous_run(state, req)
-    return {"project": remember(state), "sandbox": result, "timeline": timeline_for(state)}
+    state = get_project(project_id); result = autonomous_run(state, req); return {"project": remember(state), "sandbox": result, "timeline": timeline_for(state)}
 
 @app.get("/projects/{project_id}/autonomous/stream")
-def autonomous_project_stream(project_id: str, instruction: str = "Work through the project until it runs.", max_rounds: int = 10):
-    return StreamingResponse(autonomous_stream_events(get_project(project_id), instruction, max_rounds), media_type="text/event-stream")
+def autonomous_project_stream(project_id: str, instruction: str = "Work through the project until it runs.", max_rounds: int = 10): return StreamingResponse(autonomous_stream_events(get_project(project_id), instruction, max_rounds), media_type="text/event-stream")
 
 @app.get("/projects/{project_id}/graph")
 def get_graph(project_id: str): return project_graph(get_project(project_id))
@@ -579,24 +622,19 @@ def get_timeline(project_id: str): return timeline_for(get_project(project_id))
 
 @app.post("/projects/{project_id}/snapshot")
 def manual_snapshot(project_id: str, req: SnapshotRequest):
-    state = get_project(project_id); item = create_snapshot(state, req.label)
-    state.logs.append(f"Snapshot saved: {item['snapshot_id']} {req.label}"); remember(state)
-    return item
+    state = get_project(project_id); item = create_snapshot(state, req.label); state.logs.append(f"Snapshot saved: {item['snapshot_id']} {req.label}"); remember(state); return item
 
 @app.get("/projects/{project_id}/snapshots")
-def get_snapshots(project_id: str):
-    get_project(project_id); return {"project_id": project_id, "snapshots": list_snapshots(project_id)}
+def get_snapshots(project_id: str): get_project(project_id); return {"project_id": project_id, "snapshots": list_snapshots(project_id)}
 
 @app.post("/projects/{project_id}/restore/{snapshot_id}")
 def restore_project_snapshot(project_id: str, snapshot_id: str) -> BuildState:
     restored = restore_snapshot(project_id, snapshot_id)
     if not restored: raise HTTPException(404, "Snapshot not found")
-    PROJECTS[project_id] = restored; save_project(restored); snap(restored, f"restored {snapshot_id}")
-    return remember(restored)
+    PROJECTS[project_id] = restored; save_project(restored); snap(restored, f"restored {snapshot_id}"); return remember(restored)
 
 @app.post("/projects/{project_id}/sandbox/start")
-def sandbox_start(project_id: str):
-    state = get_project(project_id); snap(state, "before sandbox start"); save_project(state); return start_sandbox(state)
+def sandbox_start(project_id: str): state = get_project(project_id); snap(state, "before sandbox start"); save_project(state); return start_sandbox(state)
 
 @app.post("/projects/{project_id}/sandbox/stop")
 def sandbox_stop(project_id: str): return stop_sandbox(project_id)
@@ -615,8 +653,7 @@ def sandbox_fix(project_id: str, req: SandboxFixRequest):
     state.logs.append("Agent memory context:\n" + memory_context(req.instruction + " " + str(info.get("last_error") or "")))
     state.logs.append("Selected agents: " + ", ".join(agent.name for agent in select_agent_team(req.instruction + " " + str(info.get("last_error") or ""))))
     if info.get("last_error"):
-        state.logs.append("Sandbox last error: " + str(info.get("last_error"))[-2000:])
-        learn_from_errors(state, [str(info.get("last_error"))], category="sandbox_failure")
+        state.logs.append("Sandbox last error: " + str(info.get("last_error"))[-2000:]); learn_from_errors(state, [str(info.get("last_error"))], category="sandbox_failure")
     if recent: state.logs.append("Sandbox recent logs:\n" + "\n".join(recent[-40:]))
     agent = get_or_create_specialist(req.instruction + " dependency build repair")
     remember_agent_result(agent, state.project_id, f"Sandbox fix requested: {req.instruction}")
@@ -629,9 +666,7 @@ def sandbox_fix(project_id: str, req: SandboxFixRequest):
 def export(project_id: str):
     state = get_project(project_id)
     if state.status != "valid": state.logs.append("Snapshot exported while project was not valid")
-    snap(state, "exported snapshot"); path = export_project(state)
-    safe_name = state.spec.app_name.replace(" ", "_"); save_project(state)
-    return FileResponse(path, filename=f"{safe_name}_snapshot.zip")
+    snap(state, "exported snapshot"); path = export_project(state); safe_name = state.spec.app_name.replace(" ", "_"); save_project(state); return FileResponse(path, filename=f"{safe_name}_snapshot.zip")
 
 @app.get("/projects/{project_id}/export-snapshot")
 def export_snapshot(project_id: str): return export(project_id)
