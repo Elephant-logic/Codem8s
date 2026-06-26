@@ -72,11 +72,11 @@ export default function App() {
     }
   }
 
-  async function refreshSandbox() {
-    if (!projectId) return;
-    const latest = await request(`/projects/${projectId}/sandbox/logs?limit=300`);
+  async function refreshSandbox(id = projectId) {
+    if (!id) return;
+    const latest = await request(`/projects/${id}/sandbox/logs?limit=300`);
     setLogs(latest.logs || []);
-    setSandbox(await request(`/projects/${projectId}/sandbox/status`));
+    setSandbox(await request(`/projects/${id}/sandbox/status`));
   }
 
   async function loadFolder(event) {
@@ -119,12 +119,11 @@ export default function App() {
     await run('Validating and repairing...', async () => setProject(await post(`/projects/${projectId}/validate`)));
   }
 
-  async function runSandbox() {
-    if (!projectId) return null;
-    const result = await post(`/projects/${projectId}/sandbox/start`);
+  async function runSandbox(id = projectId) {
+    if (!id) return null;
+    const result = await post(`/projects/${id}/sandbox/start`);
     setSandbox(result);
-    const latest = await request(`/projects/${projectId}/sandbox/logs?limit=300`);
-    setLogs(latest.logs || []);
+    await refreshSandbox(id);
     return result;
   }
 
@@ -139,25 +138,40 @@ export default function App() {
       }
       setSandbox(result);
       await refreshSandbox();
+      addChat('codem8s', result?.build_ok ? 'Build is green and preview is live.' : 'I worked through repair rounds but it still needs attention.');
     });
   }
 
-  async function saveFile() {
+  async function autonomousMode(text = command || instruction) {
+    if (!projectId) return;
+    await run('Autonomous mode: working until it runs...', async () => {
+      addChat('you', text || 'Work until it runs.');
+      const result = await post(`/projects/${projectId}/autonomous`, { instruction: text || 'Work through the project until it runs.', max_rounds: 12 });
+      if (result.project) setProject(result.project);
+      if (result.sandbox) setSandbox(result.sandbox);
+      await refreshSandbox(projectId);
+      addChat('codem8s', result.project?.status === 'valid' ? 'Autonomous mode finished: project is valid and preview should be live.' : 'Autonomous mode reached a stopping point. Check logs or give me a narrower instruction.');
+    });
+  }
+
+  async function saveFile(runAfter = false) {
     if (!projectId || !selectedPath) return;
     await run(`Saving ${selectedPath}...`, async () => {
       const saved = await post(`/projects/${projectId}/files/save`, { path: selectedPath, content, instruction: 'Manual workbench edit' });
       setProject(saved);
       await selectFile(selectedPath, saved);
-      addChat('system', `Saved ${selectedPath}.`);
+      if (runAfter) await runSandbox(saved.project_id);
+      addChat('system', runAfter ? `Saved and previewed ${selectedPath}.` : `Saved ${selectedPath}.`);
     });
   }
 
-  async function smartEditFile(text = editInstruction) {
+  async function smartEditFile(text = editInstruction, runAfter = false) {
     if (!projectId || !selectedPath) return null;
     const result = await post(`/projects/${projectId}/files/refactor`, { path: selectedPath, content, instruction: text });
     setProject(result.project);
     setContent(result.file.content || '');
     setInspection(result.inspection || null);
+    if (runAfter) await runSandbox(result.project.project_id);
     return result;
   }
 
@@ -170,18 +184,26 @@ export default function App() {
       let activeProject = project;
       if (!activeProject) {
         activeProject = await createProjectFromIdea(text);
-        addChat('codem8s', 'Created a new project from your request. Press Build All or ask me to build/run it.');
+        addChat('codem8s', 'Created a new project from your request. Ask me to build/run it, or press Autonomous: Do Everything.');
+        return;
+      }
+      if (/\b(keep working|autonomous|do everything|finish it|until it runs|make it work)\b/i.test(text)) {
+        const result = await post(`/projects/${activeProject.project_id}/autonomous`, { instruction: text, max_rounds: 12 });
+        if (result.project) setProject(result.project);
+        if (result.sandbox) setSandbox(result.sandbox);
+        await refreshSandbox(activeProject.project_id);
+        addChat('codem8s', 'Ran autonomous mode. I generated, repaired, built, and tried to preview the project.');
         return;
       }
       if (wantsWholeProject(text)) {
         const changed = await post(`/projects/${activeProject.project_id}/change`, { instruction: text });
         setProject(changed);
         activeProject = changed;
-        addChat('codem8s', 'Applied this as a project-wide instruction. I updated the plan and connected files can now be rebuilt/repaired.');
+        addChat('codem8s', 'Applied this as a project-wide instruction. Use Autonomous to execute it fully.');
       } else if (selectedPath) {
-        const result = await smartEditFile(text);
+        const result = await smartEditFile(text, wantsRun(text));
         activeProject = result?.project || activeProject;
-        addChat('codem8s', `Edited ${selectedPath}. Review the code and preview when ready.`);
+        addChat('codem8s', `Edited ${selectedPath}.${wantsRun(text) ? ' Preview was refreshed.' : ' Review the code and preview when ready.'}`);
       } else {
         const result = await post(`/projects/${activeProject.project_id}/team/run`, { goal: text, max_cycles: 1 });
         if (result.project) {
@@ -190,12 +212,11 @@ export default function App() {
         }
         addChat('codem8s', 'Ran the project agents on your request.');
       }
-      if (wantsRun(text)) {
+      if (wantsRun(text) && !selectedPath) {
         const result = await post(`/projects/${activeProject.project_id}/sandbox/start`);
         setSandbox(result);
-        const latest = await request(`/projects/${activeProject.project_id}/sandbox/logs?limit=300`);
-        setLogs(latest.logs || []);
-        addChat('codem8s', result.build_ok ? 'Preview is live.' : 'Build/preview is not green yet. Ask me to make it work, or press Work Through Errors.');
+        await refreshSandbox(activeProject.project_id);
+        addChat('codem8s', result.build_ok ? 'Preview is live.' : 'Build/preview is not green yet. Press Autonomous or Make It Work.');
       }
     });
   }
@@ -215,7 +236,7 @@ export default function App() {
         <h2>Ask Codem8s</h2>
         <p>Examples: “make this file cleaner”, “make the whole project dark mode”, “run it”, “make it work”, “turn this into a one-file HTML app”.</p>
         <textarea value={command} onChange={(e) => setCommand(e.target.value)} placeholder="Ask Codem8s to change, build, preview, repair, explain, or refactor..." />
-        <div className="row action-row"><button onClick={runUnifiedCommand} disabled={busy}>Do It</button><button onClick={workErrors} disabled={!projectId || busy}>Make It Work</button><button onClick={exportZip} disabled={!projectId}>Export Snapshot</button></div>
+        <div className="row action-row"><button onClick={runUnifiedCommand} disabled={busy}>Do It</button><button onClick={() => autonomousMode(command || instruction)} disabled={!projectId || busy}>Autonomous: Do Everything</button><button onClick={workErrors} disabled={!projectId || busy}>Make It Work</button><button onClick={exportZip} disabled={!projectId}>Export Snapshot</button></div>
         <div className="chat-log">{chat.map((item, index) => <div className={`chat-line ${item.role}`} key={`${index}-${item.at}`}><b>{item.role}</b><span>{item.text}</span></div>)}</div>
       </section>
 
@@ -240,7 +261,7 @@ export default function App() {
             <textarea className="code-editor" value={content} onChange={(e) => setContent(e.target.value)} />
             <h3>Selected-file edit request</h3>
             <textarea value={editInstruction} onChange={(e) => setEditInstruction(e.target.value)} />
-            <div className="row action-row"><button onClick={saveFile} disabled={!selectedPath || busy}>Save File</button><button onClick={() => run('Editing file...', () => smartEditFile())} disabled={!selectedPath || busy}>Assistant Edit Selected File</button><button onClick={validate} disabled={!projectId || busy}>Validate / Repair</button><button onClick={() => run('Running sandbox...', runSandbox)} disabled={!projectId || busy}>Run Sandbox</button></div>
+            <div className="row action-row"><button onClick={() => saveFile(false)} disabled={!selectedPath || busy}>Save File</button><button onClick={() => saveFile(true)} disabled={!selectedPath || busy}>Save + Preview</button><button onClick={() => run('Editing file...', () => smartEditFile(editInstruction, false))} disabled={!selectedPath || busy}>Assistant Edit</button><button onClick={() => run('Editing and previewing...', () => smartEditFile(editInstruction, true))} disabled={!selectedPath || busy}>Assistant Edit + Preview</button><button onClick={validate} disabled={!projectId || busy}>Validate / Repair</button></div>
           </section>
         </div>
       </section>
