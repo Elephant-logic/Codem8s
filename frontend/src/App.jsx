@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
 const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s-docker.onrender.com';
 const TEXT_EXTENSIONS = ['.js', '.jsx', '.ts', '.tsx', '.css', '.html', '.json', '.md', '.py', '.txt', '.yml', '.yaml'];
+const WORKSPACE_KEY = 'codem8s-workspace-v1';
 
 function isTextFile(path) {
   return TEXT_EXTENSIONS.some((ext) => path.endsWith(ext)) || ['package.json', 'requirements.txt', 'Dockerfile', 'Makefile'].includes(path.split('/').pop());
@@ -19,10 +20,83 @@ function wantsWholeProject(text) {
   return /\b(all files|whole project|entire project|everywhere|across the project|multi[- ]file|app wide|global)\b/i.test(text || '');
 }
 
+function readWorkspace() {
+  try { return JSON.parse(localStorage.getItem(WORKSPACE_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function writeWorkspace(items) {
+  localStorage.setItem(WORKSPACE_KEY, JSON.stringify(items.slice(0, 20)));
+}
+
+function normalise(parts) {
+  const out = [];
+  parts.forEach((part) => {
+    if (!part || part === '.') return;
+    if (part === '..') out.pop();
+    else out.push(part);
+  });
+  return out.join('/');
+}
+
+function resolveRelative(fromPath, spec, fileMap) {
+  if (!spec?.startsWith?.('.')) return null;
+  const base = fromPath.split('/').slice(0, -1);
+  const raw = normalise([...base, ...spec.split('/')]);
+  const candidates = [raw, `${raw}.js`, `${raw}.jsx`, `${raw}.ts`, `${raw}.tsx`, `${raw}.json`, `${raw}.css`, `${raw}/index.js`, `${raw}/index.jsx`, `${raw}/index.ts`, `${raw}/index.tsx`];
+  return candidates.find((candidate) => fileMap[candidate]) || null;
+}
+
+function importsFor(path, content) {
+  if (!/\.(js|jsx|ts|tsx)$/.test(path)) return [];
+  const specs = [];
+  const re = /import(?:\s+[^'\"]+\s+from)?\s*['\"]([^'\"]+)['\"]|from\s+['\"]([^'\"]+)['\"]/g;
+  let match;
+  while ((match = re.exec(content || ''))) specs.push(match[1] || match[2]);
+  return [...new Set(specs.filter(Boolean))].sort();
+}
+
+function buildProjectBrain(project) {
+  const fileMap = Object.fromEntries(listFiles(project).map((f) => [f.path, f.content || '']));
+  const files = Object.keys(fileMap);
+  const imports = {};
+  const dependents = {};
+  files.forEach((path) => { dependents[path] = []; });
+  files.forEach((path) => {
+    imports[path] = importsFor(path, fileMap[path]).map((spec) => resolveRelative(path, spec, fileMap)).filter(Boolean);
+    imports[path].forEach((target) => dependents[target]?.push(path));
+  });
+  const packageFile = project?.files?.['package.json'] || project?.files?.['frontend/package.json'];
+  let scripts = [];
+  let deps = [];
+  try {
+    const pkg = packageFile?.content ? JSON.parse(packageFile.content) : null;
+    scripts = Object.keys(pkg?.scripts || {});
+    deps = Object.keys({ ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) });
+  } catch {}
+  const htmlFiles = files.filter((p) => p.endsWith('.html'));
+  const entryPoints = files.filter((p) => /(^|\/)(main|index|app)\.(jsx|tsx|js|ts|html|py)$/.test(p.toLowerCase()));
+  const ui = files.filter((p) => /\.(jsx|tsx)$/.test(p) || /component|screen|page|view|ui/i.test(p));
+  const state = files.filter((p) => /store|state|reducer|context/i.test(p));
+  const api = files.filter((p) => /api|route|server|endpoint|fastapi|express/i.test(p));
+  const styles = files.filter((p) => /\.(css|scss)$/.test(p));
+  const data = files.filter((p) => /data|schema|model|seed|fixture|json/i.test(p));
+  const build = files.filter((p) => /package\.json|vite|webpack|tsconfig|requirements|dockerfile|makefile/i.test(p));
+  const central = files.map((p) => ({ path: p, score: (imports[p]?.length || 0) + (dependents[p]?.length || 0) * 2 })).sort((a, b) => b.score - a.score).slice(0, 8);
+  const projectType = deps.includes('vite') && deps.includes('react') ? 'React/Vite app' : htmlFiles.length && files.length <= 8 ? 'Standalone HTML/static app' : files.some((p) => p.endsWith('.py')) ? 'Python or mixed project' : project?.spec?.stack || 'Imported codebase';
+  const risks = [];
+  if (!entryPoints.length) risks.push('No obvious entry point detected.');
+  if (!build.length && !htmlFiles.length) risks.push('No build/static entry file detected.');
+  if (files.some((p) => (fileMap[p] || '').split('\n').length > 500)) risks.push('One or more very large files may need splitting.');
+  if (listFiles(project).some((f) => f.status === 'rejected')) risks.push('Some files are currently rejected by validation.');
+  return { projectType, scripts, deps: deps.slice(0, 20), entryPoints, groups: { UI: ui, State: state, API: api, Styles: styles, Data: data, Build: build }, central, risks, imports, dependents, summary: `${projectType}. ${files.length} files, ${entryPoints.length} entry point(s), ${ui.length} UI file(s), ${state.length} state file(s), ${api.length} API file(s).` };
+}
+
 export default function App() {
   const [idea, setIdea] = useState('Build a React/Vite tower defense game with waves, enemies, towers, upgrades, HUD, canvas gameplay, specialist game architecture, and polished UI.');
   const [instruction, setInstruction] = useState('Use dependency topology and real npm build logs to repair the app until it runs.');
   const [project, setProject] = useState(null);
+  const [workspace, setWorkspace] = useState(() => readWorkspace());
   const [selectedPath, setSelectedPath] = useState('');
   const [content, setContent] = useState('');
   const [inspection, setInspection] = useState(null);
@@ -36,7 +110,16 @@ export default function App() {
 
   const projectId = project?.project_id;
   const files = listFiles(project);
+  const brain = useMemo(() => project ? buildProjectBrain(project) : null, [project]);
   const previewUrl = sandbox?.preview_url ? API + sandbox.preview_url : '';
+
+  useEffect(() => {
+    if (!project?.project_id) return;
+    const item = { project_id: project.project_id, name: project.spec?.app_name || 'Untitled project', stack: project.spec?.stack || '', status: project.status, files: files.length, updated_at: new Date().toISOString() };
+    const next = [item, ...workspace.filter((p) => p.project_id !== item.project_id)].slice(0, 20);
+    setWorkspace(next);
+    writeWorkspace(next);
+  }, [project?.project_id, project?.status, files.length]);
 
   async function request(path, options = {}) {
     const res = await fetch(API + path, options);
@@ -60,7 +143,7 @@ export default function App() {
   }
 
   function addChat(role, text) {
-    setChat((old) => [...old, { role, text, at: new Date().toLocaleTimeString() }].slice(-60));
+    setChat((old) => [...old, { role, text, at: new Date().toLocaleTimeString() }].slice(-80));
   }
 
   async function selectFile(path, nextProject = project) {
@@ -79,6 +162,19 @@ export default function App() {
     setSandbox(await request(`/projects/${id}/sandbox/status`));
   }
 
+  async function openWorkspaceProject(id) {
+    await run('Opening workspace project...', async () => {
+      const data = await request(`/projects/${id}/timeline`).catch(() => null);
+      // The timeline endpoint proves the project exists; most app state is loaded by project-specific actions, so use validate as a safe hydrate path.
+      const loaded = await post(`/projects/${id}/validate`);
+      setProject(loaded);
+      const first = Object.keys(loaded.files || {}).sort()[0] || '';
+      await selectFile(first, loaded);
+      addChat('system', `Opened ${loaded.spec?.app_name || id}.`);
+      if (data?.events) setNotice(`Opened project with ${data.events.length} recent timeline events.`);
+    });
+  }
+
   async function loadFolder(event) {
     await run('Loading folder into workbench...', async () => {
       const selected = Array.from(event.target.files || []).filter((file) => isTextFile(file.webkitRelativePath || file.name));
@@ -88,7 +184,7 @@ export default function App() {
       setProject(imported);
       const first = Object.keys(imported.files || {}).sort()[0] || '';
       await selectFile(first, imported);
-      addChat('system', `Imported ${Object.keys(imported.files || {}).length} files. You can now ask for changes.`);
+      addChat('system', `Imported ${Object.keys(imported.files || {}).length} files. Project Brain is ready.`);
       setNotice(`Imported ${Object.keys(imported.files || {}).length} files. Select a file and edit it.`);
     });
   }
@@ -195,6 +291,10 @@ export default function App() {
         addChat('codem8s', 'Ran autonomous mode. I generated, repaired, built, and tried to preview the project.');
         return;
       }
+      if (/\b(explain|understand|architecture|brain|map|overview)\b/i.test(text) && brain) {
+        addChat('codem8s', `Project Brain: ${brain.summary}\nEntry points: ${brain.entryPoints.join(', ') || 'none'}\nRisks: ${brain.risks.join('; ') || 'none'}`);
+        return;
+      }
       if (wantsWholeProject(text)) {
         const changed = await post(`/projects/${activeProject.project_id}/change`, { instruction: text });
         setProject(changed);
@@ -232,13 +332,20 @@ export default function App() {
       <p><b>Backend:</b> {API}</p>
       {notice && <section className="card running"><b>{notice}</b>{busy && <div className="spinner" />}</section>}
 
+      <section className="card workspace-card">
+        <h2>Workspace</h2>
+        {workspace.length === 0 ? <p>No recent projects yet.</p> : <div className="workspace-list">{workspace.map((item) => <button className="workspace-item" key={item.project_id} onClick={() => openWorkspaceProject(item.project_id)}><b>{item.name}</b><span>{item.status} · {item.files} files · {item.stack || 'unknown stack'}</span></button>)}</div>}
+      </section>
+
       <section className="card command-card">
         <h2>Ask Codem8s</h2>
-        <p>Examples: “make this file cleaner”, “make the whole project dark mode”, “run it”, “make it work”, “turn this into a one-file HTML app”.</p>
+        <p>Examples: “explain this project”, “make this file cleaner”, “make the whole project dark mode”, “run it”, “make it work”.</p>
         <textarea value={command} onChange={(e) => setCommand(e.target.value)} placeholder="Ask Codem8s to change, build, preview, repair, explain, or refactor..." />
         <div className="row action-row"><button onClick={runUnifiedCommand} disabled={busy}>Do It</button><button onClick={() => autonomousMode(command || instruction)} disabled={!projectId || busy}>Autonomous: Do Everything</button><button onClick={workErrors} disabled={!projectId || busy}>Make It Work</button><button onClick={exportZip} disabled={!projectId}>Export Snapshot</button></div>
         <div className="chat-log">{chat.map((item, index) => <div className={`chat-line ${item.role}`} key={`${index}-${item.at}`}><b>{item.role}</b><span>{item.text}</span></div>)}</div>
       </section>
+
+      {brain && <section className="card brain-card"><h2>Project Brain</h2><p>{brain.summary}</p><div className="status-pills"><span className="pill">{brain.projectType}</span><span className="pill">scripts: {brain.scripts.join(', ') || 'none'}</span><span className="pill">deps: {brain.deps.slice(0, 4).join(', ') || 'none'}</span></div><div className="grid"><article><h3>Entry Points</h3>{brain.entryPoints.map((p) => <button className="graph-node" key={p} onClick={() => selectFile(p)}><span>{p}</span><em>open</em></button>) || 'None'}</article><article><h3>Central Files</h3>{brain.central.map((n) => <button className="graph-node" key={n.path} onClick={() => selectFile(n.path)}><span>{n.path}</span><em>{n.score}</em></button>)}</article></div><div className="grid">{Object.entries(brain.groups).map(([name, group]) => <article key={name}><h3>{name}</h3>{group.slice(0, 8).map((p) => <button className="graph-node" key={p} onClick={() => selectFile(p)}><span>{p}</span><em>open</em></button>)}{group.length === 0 && <p>None detected</p>}</article>)}</div>{brain.risks.length > 0 && <pre className="bad-box log">{brain.risks.join('\n')}</pre>}</section>}
 
       <section className="card">
         <h2>Load Existing Project</h2>
