@@ -164,6 +164,85 @@ def _ensure_missing_named_exports(path: str, code: str, all_files: dict[str, str
     return code
 
 
+def _ensure_use_game_state_facade(path: str, code: str, all_files: dict[str, str], logs: list[str]) -> str:
+    if not path.endswith('/store/gameState.js') and path != 'frontend/src/store/gameState.js':
+        return code
+    if re.search(r'\bexport\s+(?:const|function)\s+useGameState\b', code) or re.search(r'export\s*\{[^}]*\buseGameState\b', code):
+        return code
+
+    needs_hook = False
+    for importer_path, importer_code in all_files.items():
+        if not importer_path.endswith(('.js', '.jsx', '.ts', '.tsx')):
+            continue
+        for match in IMPORT_RE.finditer(importer_code):
+            if _resolve_relative(importer_path, match.group('spec'), all_files) != path:
+                continue
+            if 'useGameState' in _imported_named_symbols(match.group('what')):
+                needs_hook = True
+                break
+        if needs_hook:
+            break
+    if not needs_hook:
+        return code
+    if 'createInitialState' not in code or 'gameReducer' not in code:
+        return code
+
+    if "from 'zustand'" not in code and 'from "zustand"' not in code:
+        import_line = "import { create } from 'zustand';\n"
+        last_import = None
+        for m in re.finditer(r"^import[^\n]*\n", code, flags=re.MULTILINE):
+            last_import = m
+        if last_import:
+            code = code[:last_import.end()] + import_line + code[last_import.end():]
+        else:
+            code = import_line + code
+
+    facade = """
+
+// Deterministic store facade: generated screens often expect a Zustand-style hook.
+// Keep this small and generic so reducer-based projects still compile and run.
+const __codem8sMakeInitialGameState = () => {
+  try {
+    return createInitialState();
+  } catch (error) {
+    console.warn('Falling back to empty game state', error);
+    return {};
+  }
+};
+
+const __codem8sInitialGameState = __codem8sMakeInitialGameState();
+
+export const useGameState = create((set, get) => ({
+  game: __codem8sInitialGameState,
+  selectedTool: 'inspect',
+  viewport: { x: 0, y: 0, width: 1280, height: 720, zoom: 1 },
+  isPaused: false,
+  notifications: [],
+  dispatch: (action) => set((state) => ({ game: gameReducer(state.game, action) })),
+  setSelectedTool: (selectedTool) => set({ selectedTool }),
+  setViewport: (viewport) => set((state) => ({ viewport: { ...state.viewport, ...viewport } })),
+  setPaused: (isPaused) => set({ isPaused }),
+  addNotification: (notification) => set((state) => ({
+    notifications: [...state.notifications, { id: Date.now(), ...notification }],
+  })),
+  clearNotification: (id) => set((state) => ({
+    notifications: state.notifications.filter((note) => note.id !== id),
+  })),
+  saveGame: () => {
+    const snapshot = JSON.stringify(get().game);
+    localStorage.setItem('codem8s_transport_tycoon_save', snapshot);
+  },
+  loadGame: () => {
+    const raw = localStorage.getItem('codem8s_transport_tycoon_save');
+    if (raw) set({ game: JSON.parse(raw) });
+  },
+}));
+"""
+    code = code.rstrip() + facade + '\n'
+    logs.append(f'Deterministic state repair in {path}: added useGameState facade')
+    return code
+
+
 def _ensure_default_component_export(path: str, code: str) -> str:
     if _has_default_export(code):
         return code
@@ -257,6 +336,7 @@ def deterministic_consistency_repair(files: dict[str, str]) -> tuple[dict[str, s
         code = _remove_missing_css_imports(path, code, repaired)
         code = _repair_import_paths(path, code, repaired, logs)
         code = _ensure_data_aliases(path, code)
+        code = _ensure_use_game_state_facade(path, code, repaired, logs)
         code = _repair_known_runtime_risks(path, code, logs)
         if path.endswith('.jsx') and ('/components/' in path or '/ui/' in path or '/pages/' in path or '/scenes/' in path):
             code = _ensure_default_component_export(path, code)
