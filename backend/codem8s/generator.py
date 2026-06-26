@@ -84,114 +84,11 @@ def _export_names_for_path(path: str, spec: ProjectSpec) -> list[str]:
     return []
 
 
-def _app_shell_fallback(path: str, spec: ProjectSpec) -> str:
-    """A rich, validator-safe app shell for when the AI repeatedly fails App.jsx/App.tsx.
-
-    It avoids fallback markers and imports no generated game modules, so it can compile early
-    while the rest of the file graph is still being produced.
-    """
-    app_name = spec.app_name.replace("'", "")
-    goal = spec.goal.replace("`", "").replace("${", "")[:700]
-    game_terms = ["Tower", "Enemy", "Wave", "Resource", "Upgrade", "Map", "Canvas", "HUD"]
-    return f"""import React, {{ useMemo, useRef, useState }} from 'react';
-
-type Metric = {{ label: string; value: string; detail: string }};
-
-function drawPreview(canvas: HTMLCanvasElement | null, wave: number) {{
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#07111f';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = '#334155';
-  for (let x = 24; x < canvas.width; x += 48) {{
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-  }}
-  for (let y = 24; y < canvas.height; y += 48) {{
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-  }}
-  ctx.strokeStyle = '#f59e0b';
-  ctx.lineWidth = 8;
-  ctx.beginPath();
-  ctx.moveTo(30, 210); ctx.bezierCurveTo(160, 70, 300, 330, 610, 120); ctx.stroke();
-  ctx.fillStyle = '#22c55e';
-  [[130,150], [280,235], [435,155]].forEach(([x, y], index) => {{
-    ctx.beginPath(); ctx.arc(x, y, 18 + index * 3, 0, Math.PI * 2); ctx.fill();
-  }});
-  ctx.fillStyle = '#ef4444';
-  for (let i = 0; i < 7; i += 1) {{
-    ctx.beginPath(); ctx.arc(70 + i * 72 + wave * 3, 210 - ((i % 3) * 34), 10, 0, Math.PI * 2); ctx.fill();
-  }}
-}}
-
-export default function App() {{
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [wave, setWave] = useState(1);
-  const [credits, setCredits] = useState(450);
-  const [selectedTool, setSelectedTool] = useState('Arrow Tower');
-  const metrics: Metric[] = useMemo(() => [
-    {{ label: 'Wave', value: String(wave), detail: 'enemy pressure and spawn pacing' }},
-    {{ label: 'Credits', value: `$${{credits}}`, detail: 'player resource economy' }},
-    {{ label: 'Lives', value: String(Math.max(1, 20 - wave)), detail: 'base health and failure state' }},
-    {{ label: 'Build Mode', value: selectedTool, detail: 'tower placement and targeting' }},
-  ], [wave, credits, selectedTool]);
-
-  React.useEffect(() => {{ drawPreview(canvasRef.current, wave); }}, [wave]);
-
-  return (
-    <main className="app-shell screen">
-      <header className="panel hero">
-        <span className="badge">Playable prototype shell</span>
-        <h1>{app_name}</h1>
-        <p>{goal}</p>
-      </header>
-
-      <section className="toolbar panel">
-        {{['Arrow Tower', 'Cannon Tower', 'Frost Tower', 'Upgrade', 'Sell'].map((tool) => (
-          <button key={{tool}} type="button" onClick={{() => setSelectedTool(tool)}}>{{tool}}</button>
-        ))}}
-        <button type="button" onClick={{() => {{ setWave((value) => value + 1); setCredits((value) => value + 75); }}}}>Start Next Wave</button>
-      </section>
-
-      <section className="grid">
-        {{metrics.map((metric) => (
-          <article className="card" key={{metric.label}}>
-            <strong>{{metric.label}}</strong>
-            <h2>{{metric.value}}</h2>
-            <p>{{metric.detail}}</p>
-          </article>
-        ))}}
-      </section>
-
-      <section className="map-wrap panel">
-        <div className="hud">
-          <strong>HUD</strong>
-          <span>tower targeting</span>
-          <span>wave control</span>
-          <span>resource simulation</span>
-          <span>upgrade panel</span>
-        </div>
-        <canvas ref={{canvasRef}} width={{640}} height={{360}} aria-label="tower defense canvas map" />
-      </section>
-
-      <section className="grid">
-        {''.join(f'<article className="card"><h3>{term} System</h3><p>{term.lower()} logic is represented in the generated project plan and connected to the game workflow.</p></article>' for term in game_terms)}
-      </section>
-    </main>
-  );
-}}
-"""
-
-
 def resilient_code_fallback(path: str, spec: ProjectSpec, reason: str = "AI generation failed") -> str:
     name = (_export_names_for_path(path, spec) or [_safe_identifier(PurePosixPath(path).stem, "generated")])[0]
     app_name = spec.app_name.replace("'", "")
     goal = spec.goal.replace("`", "").replace("${", "")[:500]
     safe_reason = reason.replace("'", "").replace("\n", " ")[:200]
-
-    if PurePosixPath(path).name in {"App.jsx", "App.tsx"}:
-        return _app_shell_fallback(path, spec)
 
     if path.endswith(".css"):
         return """
