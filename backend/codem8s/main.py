@@ -33,6 +33,7 @@ app.mount("/preview", StaticFiles(directory=str(ensure_preview_root()), html=Tru
 PROJECTS: dict[str, BuildState] = load_all_projects()
 MAX_BUILD_ALL_STEPS = 50
 QUALITY_PASS_SCORE = 72
+FILE_RETRY_CAP = 3
 
 
 class SandboxFixRequest(BaseModel):
@@ -123,8 +124,12 @@ def apply_repaired_contents(state: BuildState, repaired: dict[str, str]) -> int:
         if item.content == content:
             continue
         ok, errors = validate_file(path, content, state.spec.files)
+        # Keep rejected repair content too. The next real build needs the actual file
+        # contents so it can surface the next concrete compiler/runtime error instead
+        # of getting stuck regenerating the same path from scratch.
+        item.content = content
         if ok:
-            item.content, item.status, item.errors = content, "valid", []
+            item.status, item.errors = "valid", []
             changed += 1
         else:
             item.status, item.errors = "rejected", errors
@@ -168,14 +173,18 @@ def product_quality_check(state: BuildState) -> bool:
     return score.total >= QUALITY_PASS_SCORE and not score.issues
 
 
+def _generatable_pending_files(state: BuildState) -> list[FileSpec]:
+    return [f for f in state.files.values() if f.status not in {"valid", "needs_repair"}]
+
+
 def build_one_file(state: BuildState) -> bool:
     if state.status == "paused":
         state.logs.append("Build paused")
         return False
-    pending = [f for f in state.files.values() if f.status != "valid"]
+    pending = _generatable_pending_files(state)
     if not pending:
         state.status = "complete"
-        state.logs.append("All files valid")
+        state.logs.append("All files either valid or handed to repair")
         return False
     item = pending[0]
     previous = list(item.errors or [])
@@ -184,7 +193,8 @@ def build_one_file(state: BuildState) -> bool:
         previous.append("Relevant agent memory:\n" + hints)
     content = generate_file(item.path, state.spec, use_ai=state.use_ai, previous_errors=previous)
     ok, errors = validate_file(item.path, content, state.spec.files)
-    item.content = content if ok else ""
+    # Preserve rejected content so the dependency-aware build repair can inspect it.
+    item.content = content
     item.errors = errors
     item.status = "valid" if ok else "rejected"
     state.current_file = item.path
@@ -196,12 +206,27 @@ def build_one_file(state: BuildState) -> bool:
 
 def fill_missing_files(state: BuildState, limit: int = 80) -> None:
     state.status = "building"
+    rejection_counts: dict[str, int] = {}
     for _ in range(limit):
-        if not [f for f in state.files.values() if f.status != "valid"]:
-            state.status = "complete"
-            state.logs.append("All planned files generated")
+        pending = _generatable_pending_files(state)
+        if not pending:
+            state.status = "complete" if all(f.status == "valid" for f in state.files.values()) else "needs_repair"
+            state.logs.append("All planned files generated" if state.status == "complete" else "Generation handed remaining rejected files to repair loop")
             return
         build_one_file(state)
+        item = state.files.get(state.current_file or "")
+        if item and item.status == "rejected":
+            signature = " | ".join(item.errors or [])[:1000]
+            key = f"{item.path}:{signature}"
+            rejection_counts[key] = rejection_counts.get(key, 0) + 1
+            if rejection_counts[key] >= FILE_RETRY_CAP:
+                item.status = "needs_repair"
+                state.logs.append(
+                    f"Generation retry cap hit for {item.path}; handing concrete rejected content/errors to dependency-aware repair"
+                )
+    if _generatable_pending_files(state):
+        state.logs.append("Generation step limit reached; moving to repair/build with available contents")
+    state.status = "needs_repair"
 
 
 def repair_whole_project(state: BuildState) -> None:
@@ -368,6 +393,7 @@ def timeline_for(state: BuildState) -> dict:
         elif "spec locked" in lower: kind, title = "plan", "Blueprint/spec locked"
         elif line.startswith("Accepted "): kind, title = "file", "File accepted"
         elif line.startswith("Rejected "): kind, title = "error", "File rejected"
+        elif "retry cap hit" in lower: kind, title = "repair", "Handed to repair"
         elif "agent memory" in lower: kind, title = "memory", "Agent memory"
         elif "agent" in lower: kind, title = "agent", "Agent activity"
         elif "deterministic consistency" in lower: kind, title = "repair", "Consistency repair"
@@ -394,7 +420,8 @@ def autonomous_run(state: BuildState, req: AutonomousRequest) -> dict:
         fill_missing_files(state, limit=80)
         snap(state, f"autonomous round {round_no} before repair")
         repair_whole_project(state)
-        mark_validity(state, real_build_check_and_repair(state, rounds=3))
+        build_ok = real_build_check_and_repair(state, rounds=6)
+        mark_validity(state, build_ok)
         remember(state)
         result = start_sandbox(state)
         snap(state, f"autonomous round {round_no} after sandbox")
@@ -407,8 +434,10 @@ def autonomous_run(state: BuildState, req: AutonomousRequest) -> dict:
         signature = str(result.get("last_error") or state.logs[-1] if state.logs else "")[-1500:]
         repeated = repeated + 1 if signature and signature == last_error else 0
         last_error = signature
-        if repeated >= 1:
-            state.logs.append("Autonomous mode paused: same issue repeated. Add steering instruction and run again.")
+        if repeated:
+            state.logs.append(f"Autonomous mode saw repeated issue {repeated + 1} time(s); continuing repair loop instead of pausing")
+        if repeated >= 3:
+            state.logs.append("Autonomous mode paused: same issue repeated too many times with no progress.")
             state.status = "invalid"
             remember(state)
             return result
@@ -510,7 +539,7 @@ def build_all(project_id: str) -> BuildState:
         state.logs.append("Resume before building all"); return remember(state)
     snap(state, "before build all")
     fill_missing_files(state, MAX_BUILD_ALL_STEPS)
-    if state.status == "complete":
+    if state.status in {"complete", "needs_repair"}:
         snap(state, "files generated")
         repair_whole_project(state)
         mark_validity(state, real_build_check_and_repair(state))
