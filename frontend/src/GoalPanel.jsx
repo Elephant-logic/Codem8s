@@ -3,12 +3,12 @@ import { readItems, writeItems } from './goalStorage';
 
 const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s-docker.onrender.com';
 
-export default function GoalPanel() {
+export default function GoalPanel({ project, setProject, setSandbox, refreshSandbox, refreshSnapshots, addChat, setNotice }) {
   const [items, setItems] = useState(() => readItems());
   const [text, setText] = useState('Build this project and get it running.');
-  const [activeProject, setActiveProject] = useState(null);
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState('');
+  const [lastPreview, setLastPreview] = useState(null);
 
   useEffect(() => {
     writeItems(items);
@@ -39,53 +39,69 @@ export default function GoalPanel() {
     const title = text.trim();
     if (!title) return;
     const tasks = ['Plan', 'Checkpoint', 'Build', 'Preview', 'Repair pass', 'Validate'].map((name) => ({ name, done: false }));
-    setItems((old) => [{ id: String(Date.now()), title, status: 'ready', projectId: activeProject?.project_id || '', tasks }, ...old].slice(0, 20));
+    setItems((old) => [{ id: String(Date.now()), title, status: 'ready', projectId: project?.project_id || '', tasks }, ...old].slice(0, 20));
+    addChat?.('system', `Goal created: ${title}`);
   }
 
   async function runItem(item) {
     setRunning(true);
     setMessage('Goal runner started');
+    setNotice?.('Goal runner started');
     updateItem(item.id, { status: 'running' });
+    addChat?.('goal', item.title);
     try {
-      let project = activeProject;
-      if (!project) {
+      let active = project;
+      if (!active) {
         setMessage('Creating project plan');
-        project = await post('/projects', { idea: item.title, use_ai: true });
-        setActiveProject(project);
-        updateItem(item.id, { projectId: project.project_id });
+        active = await post('/projects', { idea: item.title, use_ai: true });
+        setProject?.(active);
+        updateItem(item.id, { projectId: active.project_id });
       }
       setTask(item.id, 'Plan', true);
 
       setMessage('Saving checkpoint');
-      await post(`/projects/${project.project_id}/snapshot`, { label: `goal start ${item.title.slice(0, 40)}` });
+      await post(`/projects/${active.project_id}/snapshot`, { label: `goal start ${item.title.slice(0, 40)}` });
+      await refreshSnapshots?.(active.project_id);
       setTask(item.id, 'Checkpoint', true);
 
       setMessage('Building project');
-      project = await post(`/projects/${project.project_id}/build-all`, {});
-      setActiveProject(project);
+      active = await post(`/projects/${active.project_id}/build-all`, {});
+      setProject?.(active);
       setTask(item.id, 'Build', true);
 
       setMessage('Starting preview');
-      let preview = await post(`/projects/${project.project_id}/sandbox/start`, {});
+      let preview = await post(`/projects/${active.project_id}/sandbox/start`, {});
+      setSandbox?.(preview);
+      setLastPreview(preview);
+      await refreshSandbox?.(active.project_id);
       setTask(item.id, 'Preview', Boolean(preview?.build_ok));
 
-      if (!preview?.build_ok) {
-        setMessage('Running repair pass');
-        preview = await post(`/projects/${project.project_id}/sandbox/fix`, { instruction: item.title });
+      let repaired = Boolean(preview?.build_ok);
+      for (let round = 1; round <= 4 && !preview?.build_ok; round += 1) {
+        setMessage(`Repair pass ${round}`);
+        setNotice?.(`Goal repair pass ${round}`);
+        preview = await post(`/projects/${active.project_id}/sandbox/fix`, { instruction: item.title });
+        setSandbox?.(preview);
+        setLastPreview(preview);
+        await refreshSandbox?.(active.project_id);
+        repaired = Boolean(preview?.build_ok);
       }
-      setTask(item.id, 'Repair pass', Boolean(preview?.build_ok));
+      setTask(item.id, 'Repair pass', repaired);
 
       setMessage('Validating project');
-      project = await post(`/projects/${project.project_id}/validate`, {});
-      setActiveProject(project);
-      setTask(item.id, 'Validate', project.status === 'valid');
+      active = await post(`/projects/${active.project_id}/validate`, {});
+      setProject?.(active);
+      await refreshSnapshots?.(active.project_id);
+      setTask(item.id, 'Validate', active.status === 'valid');
 
-      const ok = preview?.build_ok || project.status === 'valid';
+      const ok = preview?.build_ok || active.status === 'valid';
       updateItem(item.id, { status: ok ? 'done' : 'blocked' });
       setMessage(ok ? 'Goal reached a runnable state' : 'Goal needs steering');
+      addChat?.('codem8s', ok ? `Goal complete: ${item.title}` : `Goal blocked: ${item.title}`);
     } catch (err) {
       updateItem(item.id, { status: 'blocked' });
       setMessage(`Goal blocked: ${String(err.message || err)}`);
+      addChat?.('codem8s', `Goal blocked: ${String(err.message || err)}`);
     } finally {
       setRunning(false);
     }
@@ -98,8 +114,11 @@ export default function GoalPanel() {
   return (
     <section className="card goal-card">
       <h2>Goal Runner</h2>
-      <p>Create a goal and run the project workflow from idea to preview.</p>
+      <p>Create a goal and run the current Codem8s project workflow from idea to preview.</p>
       {message && <p><b>{message}</b></p>}
+      {project && <p><b>Using project:</b> {project.spec?.app_name || project.project_id} · {project.status}</p>}
+      {lastPreview && <p><b>Last preview:</b> {lastPreview.build_ok ? 'green' : 'not green'} {lastPreview.preview_url || ''}</p>}
+      {lastPreview?.last_error && <pre className="log bad-box">{lastPreview.last_error}</pre>}
       <textarea value={text} onChange={(event) => setText(event.target.value)} />
       <button onClick={addItem} disabled={running}>Create Goal</button>
       <div className="goal-list">
@@ -108,7 +127,7 @@ export default function GoalPanel() {
             <div className="row">
               <b>{item.title}</b>
               <span className="pill">{item.status}</span>
-              <button onClick={() => runItem(item)} disabled={running}>Run Goal</button>
+              <button onClick={() => runItem(item)} disabled={running}>Run / Continue</button>
               <button className="warning" onClick={() => removeItem(item.id)} disabled={running}>Delete</button>
             </div>
             {(item.tasks || []).map((task) => <div className={`goal-step ${task.done ? 'done' : ''}`} key={task.name}>{task.done ? '☑' : '☐'} {task.name}</div>)}
