@@ -1,28 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { readItems, writeItems } from './goalStorage';
 import { freshTasks, markTask, runExecutionPipeline } from './executionEngine';
+import { useProject } from './projectContext.jsx';
 
-const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s-docker.onrender.com';
 const WORKSPACE_KEY = 'codem8s-workspace-v1';
 
 function readWorkspace() {
   try { return JSON.parse(localStorage.getItem(WORKSPACE_KEY) || '[]'); }
   catch { return []; }
-}
-
-function writeWorkspaceProject(project) {
-  if (!project?.project_id) return;
-  const item = {
-    project_id: project.project_id,
-    name: project.spec?.app_name || 'Goal Project',
-    stack: project.spec?.stack || '',
-    status: project.status || 'working',
-    files: Object.keys(project.files || {}).length,
-    updated_at: new Date().toISOString(),
-  };
-  const next = [item, ...readWorkspace().filter((entry) => entry.project_id !== item.project_id)].slice(0, 20);
-  localStorage.setItem(WORKSPACE_KEY, JSON.stringify(next));
-  window.dispatchEvent(new CustomEvent('codem8s-workspace-updated', { detail: item }));
 }
 
 function latestWorkspaceProjectId() {
@@ -38,55 +23,44 @@ function normalizeTasks(tasks = []) {
   });
 }
 
-export default function GoalPanel({ project, setProject, setSandbox, refreshSandbox, refreshSnapshots, addChat, setNotice }) {
+export default function GoalPanel(props = {}) {
+  const shared = useProject();
+  const project = props.project || shared.project;
+  const setProject = props.setProject || shared.setProject;
+  const setSandbox = props.setSandbox || shared.setSandbox;
+  const refreshSandbox = props.refreshSandbox || shared.refreshSandbox;
+  const refreshSnapshots = props.refreshSnapshots || shared.refreshSnapshots;
+  const setNotice = props.setNotice || shared.setNotice;
+  const post = props.post || shared.post;
+  const createSharedProject = props.createProject || shared.createProject;
+
   const [items, setItems] = useState(() => readItems().map((item) => ({ ...item, tasks: normalizeTasks(item.tasks) })));
   const [text, setText] = useState('Build this project and get it running.');
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState('');
   const [lastPreview, setLastPreview] = useState(null);
-  const [externalProject, setExternalProject] = useState(null);
   const [events, setEvents] = useState([]);
 
   useEffect(() => {
     writeItems(items);
   }, [items]);
 
-  async function request(path, options = {}) {
-    const res = await fetch(API + path, options);
-    const body = await res.text();
-    let data = null;
-    try { data = body ? JSON.parse(body) : null; } catch {}
-    if (!res.ok) throw new Error(data?.detail || body || `Request failed ${res.status}`);
-    return data;
-  }
-
-  function post(path, body) {
-    return request(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
-  }
-
-  function acceptProject(nextProject) {
-    if (!nextProject?.project_id) return;
-    setExternalProject(nextProject);
-    setProject?.(nextProject);
-    writeWorkspaceProject(nextProject);
+  function addChat(role, body) {
+    props.addChat?.(role, body);
+    window.dispatchEvent(new CustomEvent('codem8s-chat-event', { detail: { role, text: body } }));
   }
 
   async function createProjectFromGoal(goalTitle) {
     setMessage('Creating project plan');
-    const created = await post('/projects', { idea: goalTitle, use_ai: true });
-    acceptProject(created);
-    return created;
+    return createSharedProject(goalTitle);
   }
 
   async function getCurrentProject() {
     if (project?.project_id) return project;
-    if (externalProject?.project_id) return externalProject;
     const recentId = latestWorkspaceProjectId();
     if (recentId) {
       setMessage('Opening latest workspace project');
-      const loaded = await post(`/projects/${recentId}/validate`, {});
-      acceptProject(loaded);
-      return loaded;
+      return shared.openProject(recentId);
     }
     return null;
   }
@@ -102,9 +76,9 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
   function addItem() {
     const title = text.trim();
     if (!title) return;
-    const currentId = project?.project_id || externalProject?.project_id || latestWorkspaceProjectId();
+    const currentId = project?.project_id || latestWorkspaceProjectId();
     setItems((old) => [{ id: String(Date.now()), title, status: 'ready', projectId: currentId, tasks: freshTasks(), history: [] }, ...old].slice(0, 20));
-    addChat?.('system', `Goal created: ${title}`);
+    addChat('system', `Goal created: ${title}`);
   }
 
   async function runItem(item) {
@@ -113,7 +87,7 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
     setNotice?.('Execution engine started');
     setEvents([]);
     updateItem(item.id, { status: 'running', tasks: normalizeTasks(item.tasks), updatedAt: new Date().toISOString() });
-    addChat?.('goal', item.title);
+    addChat('goal', item.title);
     try {
       const startProject = await getCurrentProject();
       const result = await runExecutionPipeline({
@@ -122,7 +96,7 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
         createProject: createProjectFromGoal,
         post,
         onProject: (nextProject) => {
-          acceptProject(nextProject);
+          setProject(nextProject);
           updateItem(item.id, { projectId: nextProject.project_id });
         },
         onSandbox: async (sandbox) => {
@@ -143,11 +117,11 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
       });
       if (result.project?.project_id) await refreshSnapshots?.(result.project.project_id);
       updateItem(item.id, { status: result.ok ? 'done' : 'blocked', updatedAt: new Date().toISOString() });
-      addChat?.('codem8s', result.ok ? `Goal complete: ${item.title}` : `Goal blocked: ${item.title}`);
+      addChat('codem8s', result.ok ? `Goal complete: ${item.title}` : `Goal blocked: ${item.title}`);
     } catch (err) {
       updateItem(item.id, { status: 'blocked', updatedAt: new Date().toISOString() });
       setMessage(`Execution blocked: ${String(err.message || err)}`);
-      addChat?.('codem8s', `Execution blocked: ${String(err.message || err)}`);
+      addChat('codem8s', `Execution blocked: ${String(err.message || err)}`);
     } finally {
       setRunning(false);
     }
@@ -157,15 +131,13 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
     setItems((old) => old.filter((item) => item.id !== id));
   }
 
-  const shownProject = project || externalProject;
-
   return (
     <section className="card goal-card">
       <h2>Execution Engine</h2>
-      <p>Goals now run through a reusable Plan → Checkpoint → Build → Preview → Repair → Validate pipeline.</p>
+      <p>Goals now run through the shared project context and reusable Plan → Checkpoint → Build → Preview → Repair → Validate pipeline.</p>
       {message && <p><b>{message}</b></p>}
-      {shownProject && <p><b>Using project:</b> {shownProject.spec?.app_name || shownProject.project_id} · {shownProject.status}</p>}
-      {!shownProject && latestWorkspaceProjectId() && <p><b>Ready to use latest workspace project.</b></p>}
+      {project && <p><b>Using project:</b> {project.spec?.app_name || project.project_id} · {project.status}</p>}
+      {!project && latestWorkspaceProjectId() && <p><b>Ready to use latest workspace project.</b></p>}
       {lastPreview && <p><b>Last preview:</b> {lastPreview.build_ok ? 'green' : 'not green'} {lastPreview.preview_url || ''}</p>}
       {lastPreview?.last_error && <pre className="log bad-box">{lastPreview.last_error}</pre>}
       <textarea value={text} onChange={(event) => setText(event.target.value)} />
