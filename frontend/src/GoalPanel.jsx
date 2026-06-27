@@ -2,6 +2,16 @@ import React, { useEffect, useState } from 'react';
 import { readItems, writeItems } from './goalStorage';
 
 const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s-docker.onrender.com';
+const WORKSPACE_KEY = 'codem8s-workspace-v1';
+
+function latestWorkspaceProjectId() {
+  try {
+    const items = JSON.parse(localStorage.getItem(WORKSPACE_KEY) || '[]');
+    return items?.[0]?.project_id || '';
+  } catch {
+    return '';
+  }
+}
 
 export default function GoalPanel({ project, setProject, setSandbox, refreshSandbox, refreshSnapshots, addChat, setNotice }) {
   const [items, setItems] = useState(() => readItems());
@@ -9,6 +19,7 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState('');
   const [lastPreview, setLastPreview] = useState(null);
+  const [externalProject, setExternalProject] = useState(null);
 
   useEffect(() => {
     writeItems(items);
@@ -27,6 +38,24 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
     return request(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
   }
 
+  async function getCurrentProject(goalTitle) {
+    if (project?.project_id) return project;
+    if (externalProject?.project_id) return externalProject;
+    const recentId = latestWorkspaceProjectId();
+    if (recentId) {
+      setMessage('Opening latest workspace project');
+      const loaded = await post(`/projects/${recentId}/validate`, {});
+      setExternalProject(loaded);
+      setProject?.(loaded);
+      return loaded;
+    }
+    setMessage('Creating project plan');
+    const created = await post('/projects', { idea: goalTitle, use_ai: true });
+    setExternalProject(created);
+    setProject?.(created);
+    return created;
+  }
+
   function updateItem(id, patch) {
     setItems((old) => old.map((item) => item.id === id ? { ...item, ...patch } : item));
   }
@@ -38,8 +67,9 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
   function addItem() {
     const title = text.trim();
     if (!title) return;
+    const currentId = project?.project_id || externalProject?.project_id || latestWorkspaceProjectId();
     const tasks = ['Plan', 'Checkpoint', 'Build', 'Preview', 'Repair pass', 'Validate'].map((name) => ({ name, done: false }));
-    setItems((old) => [{ id: String(Date.now()), title, status: 'ready', projectId: project?.project_id || '', tasks }, ...old].slice(0, 20));
+    setItems((old) => [{ id: String(Date.now()), title, status: 'ready', projectId: currentId, tasks }, ...old].slice(0, 20));
     addChat?.('system', `Goal created: ${title}`);
   }
 
@@ -50,13 +80,8 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
     updateItem(item.id, { status: 'running' });
     addChat?.('goal', item.title);
     try {
-      let active = project;
-      if (!active) {
-        setMessage('Creating project plan');
-        active = await post('/projects', { idea: item.title, use_ai: true });
-        setProject?.(active);
-        updateItem(item.id, { projectId: active.project_id });
-      }
+      let active = await getCurrentProject(item.title);
+      updateItem(item.id, { projectId: active.project_id });
       setTask(item.id, 'Plan', true);
 
       setMessage('Saving checkpoint');
@@ -66,6 +91,7 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
 
       setMessage('Building project');
       active = await post(`/projects/${active.project_id}/build-all`, {});
+      setExternalProject(active);
       setProject?.(active);
       setTask(item.id, 'Build', true);
 
@@ -90,6 +116,7 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
 
       setMessage('Validating project');
       active = await post(`/projects/${active.project_id}/validate`, {});
+      setExternalProject(active);
       setProject?.(active);
       await refreshSnapshots?.(active.project_id);
       setTask(item.id, 'Validate', active.status === 'valid');
@@ -111,12 +138,15 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
     setItems((old) => old.filter((item) => item.id !== id));
   }
 
+  const shownProject = project || externalProject;
+
   return (
     <section className="card goal-card">
       <h2>Goal Runner</h2>
       <p>Create a goal and run the current Codem8s project workflow from idea to preview.</p>
       {message && <p><b>{message}</b></p>}
-      {project && <p><b>Using project:</b> {project.spec?.app_name || project.project_id} · {project.status}</p>}
+      {shownProject && <p><b>Using project:</b> {shownProject.spec?.app_name || shownProject.project_id} · {shownProject.status}</p>}
+      {!shownProject && latestWorkspaceProjectId() && <p><b>Ready to use latest workspace project.</b></p>}
       {lastPreview && <p><b>Last preview:</b> {lastPreview.build_ok ? 'green' : 'not green'} {lastPreview.preview_url || ''}</p>}
       {lastPreview?.last_error && <pre className="log bad-box">{lastPreview.last_error}</pre>}
       <textarea value={text} onChange={(event) => setText(event.target.value)} />
