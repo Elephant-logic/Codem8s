@@ -44,11 +44,16 @@ export async function runExecutionPipeline({
   await post(`/projects/${active.project_id}/snapshot`, { label: `goal start ${goal.title.slice(0, 50)}` });
   task('Checkpoint', 'done');
 
-  emit('Building project');
-  task('Build', 'running');
-  active = await post(`/projects/${active.project_id}/build-all`, {});
-  onProject?.(active);
-  task('Build', 'done', `${Object.keys(active.files || {}).length} files`);
+  const existingFileCount = Object.keys(active.files || {}).length;
+  if (existingFileCount > 0) {
+    task('Build', 'done', `${existingFileCount} files already built`);
+  } else {
+    emit('Building project');
+    task('Build', 'running');
+    active = await post(`/projects/${active.project_id}/build-all`, {});
+    onProject?.(active);
+    task('Build', 'done', `${Object.keys(active.files || {}).length} files`);
+  }
 
   emit('Starting preview');
   task('Preview', 'running');
