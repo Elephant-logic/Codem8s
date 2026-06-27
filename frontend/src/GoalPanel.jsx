@@ -5,13 +5,28 @@ import { freshTasks, markTask, runExecutionPipeline } from './executionEngine';
 const API = import.meta.env.VITE_API_BASE_URL || 'https://codem8s-docker.onrender.com';
 const WORKSPACE_KEY = 'codem8s-workspace-v1';
 
+function readWorkspace() {
+  try { return JSON.parse(localStorage.getItem(WORKSPACE_KEY) || '[]'); }
+  catch { return []; }
+}
+
+function writeWorkspaceProject(project) {
+  if (!project?.project_id) return;
+  const item = {
+    project_id: project.project_id,
+    name: project.spec?.app_name || 'Goal Project',
+    stack: project.spec?.stack || '',
+    status: project.status || 'working',
+    files: Object.keys(project.files || {}).length,
+    updated_at: new Date().toISOString(),
+  };
+  const next = [item, ...readWorkspace().filter((entry) => entry.project_id !== item.project_id)].slice(0, 20);
+  localStorage.setItem(WORKSPACE_KEY, JSON.stringify(next));
+  window.dispatchEvent(new CustomEvent('codem8s-workspace-updated', { detail: item }));
+}
+
 function latestWorkspaceProjectId() {
-  try {
-    const items = JSON.parse(localStorage.getItem(WORKSPACE_KEY) || '[]');
-    return items?.[0]?.project_id || '';
-  } catch {
-    return '';
-  }
+  return readWorkspace()?.[0]?.project_id || '';
 }
 
 function normalizeTasks(tasks = []) {
@@ -49,11 +64,17 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
     return request(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
   }
 
+  function acceptProject(nextProject) {
+    if (!nextProject?.project_id) return;
+    setExternalProject(nextProject);
+    setProject?.(nextProject);
+    writeWorkspaceProject(nextProject);
+  }
+
   async function createProjectFromGoal(goalTitle) {
     setMessage('Creating project plan');
     const created = await post('/projects', { idea: goalTitle, use_ai: true });
-    setExternalProject(created);
-    setProject?.(created);
+    acceptProject(created);
     return created;
   }
 
@@ -64,8 +85,7 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
     if (recentId) {
       setMessage('Opening latest workspace project');
       const loaded = await post(`/projects/${recentId}/validate`, {});
-      setExternalProject(loaded);
-      setProject?.(loaded);
+      acceptProject(loaded);
       return loaded;
     }
     return null;
@@ -102,8 +122,7 @@ export default function GoalPanel({ project, setProject, setSandbox, refreshSand
         createProject: createProjectFromGoal,
         post,
         onProject: (nextProject) => {
-          setExternalProject(nextProject);
-          setProject?.(nextProject);
+          acceptProject(nextProject);
           updateItem(item.id, { projectId: nextProject.project_id });
         },
         onSandbox: async (sandbox) => {
