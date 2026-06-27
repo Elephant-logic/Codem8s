@@ -107,11 +107,16 @@ export function ProjectProvider({ children }) {
     return loaded;
   }
 
-  async function createProject(idea) {
+  async function createProject(idea, options = {}) {
     const created = await post('/projects', { idea, use_ai: true });
     setProject(created);
     await refreshSnapshots(created.project_id);
-    return created;
+    if (options.planOnly) return created;
+    setNotice('Building files from project plan...');
+    const built = await post(`/projects/${created.project_id}/build-all`, {});
+    setProject(built);
+    await refreshSnapshots(built.project_id);
+    return built;
   }
 
   async function snapshot(label = 'manual checkpoint') {
