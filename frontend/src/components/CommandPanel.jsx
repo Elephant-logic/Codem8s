@@ -9,7 +9,16 @@ export default function CommandPanel({ command, setCommand, chat = [], busy, pro
     if (!projectId || working) return;
     setWorking(true);
     try {
-      await fetch(`${API}/projects/${projectId}/build-all`, { method: 'POST' });
+      // Build-all currently advances generation in bounded passes. Run several passes so
+      // large plans do not stop with package/App/main still empty before sandbox repair.
+      for (let pass = 0; pass < 4; pass += 1) {
+        const response = await fetch(`${API}/projects/${projectId}/build-all`, { method: 'POST' });
+        if (!response.ok) break;
+        const project = await response.json().catch(() => null);
+        const files = Object.values(project?.files || {});
+        const emptyCount = files.filter((file) => !String(file?.content || '').trim()).length;
+        if (emptyCount === 0) break;
+      }
     } catch (error) {
       console.warn('Build-all before make-it-work failed; continuing repair flow', error);
     } finally {
